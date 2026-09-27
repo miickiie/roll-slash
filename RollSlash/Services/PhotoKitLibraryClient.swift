@@ -67,6 +67,10 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
     }
 
     func deleteAssets(with identifiers: [String]) async throws {
+        try await Self.performDeletion(identifiers)
+    }
+
+    nonisolated private static func performDeletion(_ identifiers: [String]) async throws {
         guard !identifiers.isEmpty else { return }
         let assets = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
         try await PHPhotoLibrary.shared().performChanges {

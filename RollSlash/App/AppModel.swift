@@ -99,7 +99,8 @@ final class AppModel {
         guard !hasStarted else { return }
         hasStarted = true
         photoLibrary.onLibraryChange = { [weak self] in
-            Task { await self?.reloadLibrary() }
+            guard let self, !self.isDeleting else { return }
+            Task { await self.reloadLibrary() }
         }
         permission = photoLibrary.authorizationStatus()
 
@@ -373,6 +374,7 @@ final class AppModel {
 
     func commitDeletion() async {
         guard let session = activeSession else { return }
+        let sessionID = session.identifier
         let fullyReviewed = session.cursor >= session.orderedAssetIDs.count
         let selected = session.reviewSelectedIDs
         isDeleting = true
@@ -391,6 +393,7 @@ final class AppModel {
             do {
                 try await photoLibrary.deleteAssets(with: selected)
             } catch {
+                guard activeSession?.identifier == sessionID else { return }
                 session.status = .reviewing
                 do {
                     try repository.save()
@@ -401,9 +404,10 @@ final class AppModel {
                 errorMessage = String(localized: "Nothing was deleted. \(error.localizedDescription)")
                 return
             }
-        }
+    }
 
         do {
+            guard activeSession?.identifier == sessionID else { return }
             if !selected.isEmpty { try repository.removeDecisions(for: Set(selected)) }
             try finalizeSession(session, markGroupsCompleted: fullyReviewed)
             await reloadLibrary()
@@ -479,7 +483,11 @@ final class AppModel {
         try repository.finish(session: session)
         activeSession = nil
         actions = []
-        try rebuildGroups()
+        do {
+            try rebuildGroups()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func rebuildGroups() throws {
