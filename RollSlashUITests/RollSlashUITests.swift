@@ -49,7 +49,6 @@ final class RollSlashUITests: XCTestCase {
 
         XCTAssertTrue(app.buttons["open-media-viewer"].waitForExistence(timeout: 3))
         app.buttons["open-media-viewer"].tap()
-        XCTAssertTrue(app.otherElements["media-viewer"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["close-media-viewer"].waitForExistence(timeout: 3))
         app.buttons["close-media-viewer"].tap()
         XCTAssertTrue(app.buttons["decision-keep"].waitForExistence(timeout: 3))

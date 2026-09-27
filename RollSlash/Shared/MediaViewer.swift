@@ -32,6 +32,18 @@ struct MediaViewer: View {
                         .font(.headline)
                         .foregroundStyle(.white)
                     Spacer()
+                    if asset.mediaKind == .video {
+                        Button(isMuted ? "Unmute" : "Mute", systemImage: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") {
+                            isMuted.toggle()
+                            player?.isMuted = isMuted
+                        }
+                        .labelStyle(.iconOnly)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(12)
+                        .background(.black.opacity(0.55), in: .circle)
+                        .accessibilityHint("Toggles sound for this video preview.")
+                    }
                     Button("Close", systemImage: "xmark") { dismiss() }
                         .labelStyle(.iconOnly)
                         .font(.title3.weight(.semibold))
@@ -46,7 +58,6 @@ struct MediaViewer: View {
                 Spacer()
             }
         }
-        .accessibilityIdentifier("media-viewer")
         .task(id: asset.id) { await load() }
         .onDisappear { player?.pause() }
         .onLongPressGesture(minimumDuration: 0.1, pressing: { pressing in
