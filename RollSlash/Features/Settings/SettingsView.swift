@@ -22,6 +22,27 @@ struct SettingsView: View {
                 }
                 Section("Cleanup History") {
                     Button("Reset Cleanup History", role: .destructive) { confirmingReset = true }
+                        .disabled(appModel.activeSession?.status == .deleting)
+                        .popover(isPresented: $confirmingReset) {
+                            VStack(alignment: .leading, spacing: 14) {
+                                Text("Reset cleanup history?")
+                                    .font(.headline)
+                                Text("Your Photos library will not change.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                HStack {
+                                    Spacer()
+                                    Button("Cancel") { confirmingReset = false }
+                                    Button("Reset History", role: .destructive) {
+                                        confirmingReset = false
+                                        appModel.resetHistory()
+                                    }
+                                }
+                            }
+                            .padding()
+                            .frame(width: 280)
+                            .presentationCompactAdaptation(.popover)
+                        }
                     Text("This forgets kept decisions and cleaned badges. It never deletes media from Photos.")
                         .font(.caption)
                 }
@@ -33,12 +54,6 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
-            }
-            .confirmationDialog("Reset cleanup history?", isPresented: $confirmingReset) {
-                Button("Reset History", role: .destructive) { appModel.resetHistory() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Your Photos library will not change.")
             }
         }
     }

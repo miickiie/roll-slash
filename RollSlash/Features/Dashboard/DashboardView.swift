@@ -2,7 +2,6 @@ import SwiftUI
 
 struct DashboardView: View {
     @Environment(AppModel.self) private var appModel
-    @State private var showingDiscardConfirmation = false
 
     var body: some View {
         @Bindable var appModel = appModel
@@ -30,12 +29,6 @@ struct DashboardView: View {
             } message: {
                 Text(appModel.errorMessage ?? "")
             }
-            .confirmationDialog("Discard the current cleanup?", isPresented: $showingDiscardConfirmation) {
-                Button("Discard Session", role: .destructive) { appModel.discardActiveSession() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("All decisions made in this unfinished session will be removed. Your Photos library will not change.")
-            }
         }
     }
 
@@ -46,7 +39,7 @@ struct DashboardView: View {
         } else {
             VStack(spacing: 0) {
                 if appModel.isPartialAccess { LimitedAccessBanner() }
-                if appModel.activeSession != nil { ResumeBanner(showingDiscardConfirmation: $showingDiscardConfirmation) }
+                if appModel.activeSession != nil { ResumeBanner() }
                 Picker("Grouping", selection: Binding(
                     get: { appModel.grouping },
                     set: { appModel.grouping = $0 }
@@ -81,7 +74,7 @@ struct DashboardView: View {
                         VStack(spacing: 2) {
                             Text("Clean \(appModel.selectedGroupIDs.count) groups")
                                 .font(.headline)
-                            Text("\(appModel.selectedUnresolvedCount) left to review")
+                            Text("\(appModel.selectedCandidateCount) items to review")
                                 .font(.caption)
                         }
                         .frame(maxWidth: .infinity)
@@ -140,7 +133,7 @@ private struct LimitedAccessBanner: View {
 
 private struct ResumeBanner: View {
     @Environment(AppModel.self) private var appModel
-    @Binding var showingDiscardConfirmation: Bool
+    @State private var showingDiscardConfirmation = false
 
     var body: some View {
         HStack {
@@ -157,11 +150,35 @@ private struct ResumeBanner: View {
                     .buttonStyle(.borderedProminent)
             } else {
                 Button("Discard", role: .destructive) { showingDiscardConfirmation = true }
+                    .popover(isPresented: $showingDiscardConfirmation) {
+                        discardConfirmation
+                    }
                 Button("Resume") { appModel.resumeSession() }.buttonStyle(.borderedProminent)
             }
         }
         .padding()
         .background(.thinMaterial)
+    }
+
+    private var discardConfirmation: some View {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Discard the current cleanup?")
+                    .font(.headline)
+                Text("All decisions made in this unfinished session will be removed. Your Photos library will not change.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { showingDiscardConfirmation = false }
+                    Button("Discard Session", role: .destructive) {
+                        showingDiscardConfirmation = false
+                        appModel.discardActiveSession()
+                    }
+                }
+            }
+            .padding()
+            .frame(width: 300)
+            .presentationCompactAdaptation(.popover)
     }
 }
 
@@ -237,13 +254,18 @@ private struct MonthGroupList: View {
 
 private struct GroupRow: View {
     @Environment(AppModel.self) private var appModel
+    @State private var showingReviewAgainConfirmation = false
     let group: MediaGroup
 
     private var selected: Bool { appModel.selectedGroupIDs.contains(group.id) }
 
     var body: some View {
         Button {
-            appModel.toggleSelection(group)
+            if group.isCleaned && !selected {
+                showingReviewAgainConfirmation = true
+            } else {
+                appModel.toggleSelection(group)
+            }
         } label: {
             HStack(spacing: 14) {
                 MediaThumbnailView(identifier: group.thumbnailAssetID, size: CGSize(width: 72, height: 72))
@@ -260,15 +282,12 @@ private struct GroupRow: View {
                     }
                 }
                 Spacer()
-                if group.isCleaned {
-                    Image(systemName: "checkmark.seal.fill")
-                        .foregroundStyle(RollSlashTheme.keep)
-                        .accessibilityLabel("Cleaned")
-                } else {
-                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .font(.title2)
-                        .foregroundStyle(selected ? RollSlashTheme.violet : .secondary)
-                }
+                Image(systemName: selected
+                      ? "checkmark.circle.fill"
+                      : (group.isCleaned ? "checkmark.seal.fill" : "circle"))
+                    .font(.title2)
+                    .foregroundStyle(selected ? RollSlashTheme.violet : (group.isCleaned ? RollSlashTheme.keep : .secondary))
+                    .accessibilityLabel(group.isCleaned ? "Cleaned" : (selected ? "Selected" : "Not selected"))
             }
             .padding(12)
             .background(.background, in: .rect(cornerRadius: 22))
@@ -278,8 +297,29 @@ private struct GroupRow: View {
             }
         }
         .buttonStyle(.plain)
-        .disabled(group.unresolvedCount == 0)
+        .disabled(group.totalCount == 0)
         .accessibilityIdentifier("group-row-\(group.key.id)")
-        .accessibilityValue(group.isCleaned ? "Cleaned" : "\(group.unresolvedCount) left to review")
+        .accessibilityValue(group.isCleaned ? (selected ? "Cleaned, selected to review again" : "Cleaned") : "\(group.unresolvedCount) left to review")
+        .popover(isPresented: $showingReviewAgainConfirmation) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Review \(group.title) again?")
+                    .font(.headline)
+                Text("All \(group.totalCount) accessible items in this group will be added to a new swipe session. Nothing is deleted until final review.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { showingReviewAgainConfirmation = false }
+                    Button("Review Again") {
+                        showingReviewAgainConfirmation = false
+                        appModel.toggleSelection(group)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding()
+            .frame(width: 300)
+            .presentationCompactAdaptation(.popover)
+        }
     }
 }
