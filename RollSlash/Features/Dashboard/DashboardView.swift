@@ -206,6 +206,7 @@ private struct MonthGroupList: View {
         GridItem(.flexible(), spacing: 12),
         GridItem(.flexible(), spacing: 12)
     ]
+    private let singleColumn = [GridItem(.flexible())]
 
     private var sections: [(String, [MediaGroup])] {
         let grouped = Dictionary(grouping: appModel.monthGroups) { MonthGrouping.year(for: $0.key.value) ?? String(localized: "Other") }
@@ -223,7 +224,7 @@ private struct MonthGroupList: View {
                     LazyVStack(alignment: .leading, pinnedViews: [.sectionHeaders]) {
                         ForEach(sections, id: \.0) { year, groups in
                             Section {
-                                LazyVGrid(columns: columns, spacing: 12) {
+                                LazyVGrid(columns: groups.count == 1 ? singleColumn : columns, spacing: 12) {
                                     ForEach(groups) { group in
                                         MonthGroupCard(group: group)
                                     }
