@@ -182,8 +182,15 @@ private struct ZoomableImage: View {
 
     private func clampedOffset(_ proposed: CGSize, scale: CGFloat, in size: CGSize) -> CGSize {
         guard scale > 1 else { return .zero }
-        let horizontal = max(0, size.width * (scale - 1) / 2)
-        let vertical = max(0, size.height * (scale - 1) / 2)
+        let fittedImageSize: CGSize
+        if image.size.width > 0, image.size.height > 0, size.width > 0, size.height > 0 {
+            let fit = min(size.width / image.size.width, size.height / image.size.height)
+            fittedImageSize = CGSize(width: image.size.width * fit, height: image.size.height * fit)
+        } else {
+            fittedImageSize = size
+        }
+        let horizontal = max(0, (fittedImageSize.width * scale - size.width) / 2)
+        let vertical = max(0, (fittedImageSize.height * scale - size.height) / 2)
         return CGSize(
             width: min(max(proposed.width, -horizontal), horizontal),
             height: min(max(proposed.height, -vertical), vertical)
