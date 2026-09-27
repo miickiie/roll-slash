@@ -1,0 +1,83 @@
+name: RollSlash
+options:
+  bundleIdPrefix: com.rollslash
+  deploymentTarget:
+    iOS: "26.0"
+  xcodeVersion: "27.0"
+  generateEmptyDirectories: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_STRICT_CONCURRENCY: complete
+targets:
+  RollSlash:
+    type: application
+    platform: iOS
+    sources:
+      - path: RollSlash
+        excludes:
+          - Resources/Info.plist
+    resources:
+      - RollSlash/Resources/Assets.xcassets
+      - RollSlash/Resources/Localizable.xcstrings
+      - RollSlash/Resources/PrivacyInfo.xcprivacy
+    info:
+      path: RollSlash/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Roll Slash
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSPhotoLibraryUsageDescription: Roll Slash needs access to organize your library and delete only the items you approve.
+        PHPhotoLibraryPreventAutomaticLimitedAccessAlert: true
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIApplicationSupportsIndirectInputEvents: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rollslash.app
+        PRODUCT_NAME: RollSlash
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"
+    scheme:
+      testTargets:
+        - RollSlashTests
+        - RollSlashUITests
+      gatherCoverageData: true
+  RollSlashTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - RollSlashTests
+    dependencies:
+      - target: RollSlash
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rollslash.app.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/RollSlash.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/RollSlash
+        BUNDLE_LOADER: $(TEST_HOST)
+        TARGETED_DEVICE_FAMILY: "1"
+  RollSlashUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - RollSlashUITests
+    dependencies:
+      - target: RollSlash
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rollslash.app.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: RollSlash
+        TARGETED_DEVICE_FAMILY: "1"
+

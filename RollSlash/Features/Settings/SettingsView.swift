@@ -1,0 +1,55 @@
+import SwiftUI
+
+struct SettingsView: View {
+    @Environment(AppModel.self) private var appModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var confirmingReset = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Photo Access") {
+                    LabeledContent("Status", value: permissionLabel)
+                    if appModel.permission == .limited {
+                        Button("Choose More Photos") { appModel.presentLimitedLibraryPicker() }
+                    }
+                    Button("Open iOS Settings") { appModel.openSystemSettings() }
+                }
+                Section("Privacy") {
+                    Label("Roll Slash stores decisions and cached place names on this iPhone.", systemImage: "iphone")
+                    Label("Original photos and videos are never copied into app storage.", systemImage: "photo.on.rectangle")
+                    Label("Only Apple Photos, iCloud, and MapKit may use the network.", systemImage: "network")
+                }
+                Section("Cleanup History") {
+                    Button("Reset Cleanup History", role: .destructive) { confirmingReset = true }
+                    Text("This forgets kept decisions and cleaned badges. It never deletes media from Photos.")
+                        .font(.caption)
+                }
+                Section("About") {
+                    LabeledContent("Roll Slash", value: "1.0")
+                    Text("Built for iOS 26 and later.")
+                }
+            }
+            .navigationTitle("Settings")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+            .confirmationDialog("Reset cleanup history?", isPresented: $confirmingReset) {
+                Button("Reset History", role: .destructive) { appModel.resetHistory() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Your Photos library will not change.")
+            }
+        }
+    }
+
+    private var permissionLabel: String {
+        switch appModel.permission {
+        case .notDetermined: String(localized: "Not requested")
+        case .denied: String(localized: "Denied")
+        case .restricted: String(localized: "Restricted")
+        case .limited: String(localized: "Selected photos")
+        case .full: String(localized: "Full access")
+        }
+    }
+}

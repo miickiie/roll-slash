@@ -1,0 +1,285 @@
+import SwiftUI
+
+struct DashboardView: View {
+    @Environment(AppModel.self) private var appModel
+    @State private var showingDiscardConfirmation = false
+
+    var body: some View {
+        @Bindable var appModel = appModel
+        NavigationStack {
+            ZStack(alignment: .bottom) {
+                Color(.systemGroupedBackground).ignoresSafeArea()
+                content
+            }
+            .navigationTitle("Roll Slash")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Settings", systemImage: "gearshape") {
+                        appModel.showingSettings = true
+                    }
+                }
+            }
+            .sheet(isPresented: $appModel.showingSettings) {
+                SettingsView()
+            }
+            .alert("Roll Slash", isPresented: Binding(
+                get: { appModel.errorMessage != nil },
+                set: { if !$0 { appModel.errorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) { appModel.errorMessage = nil }
+            } message: {
+                Text(appModel.errorMessage ?? "")
+            }
+            .confirmationDialog("Discard the current cleanup?", isPresented: $showingDiscardConfirmation) {
+                Button("Discard Session", role: .destructive) { appModel.discardActiveSession() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("All decisions made in this unfinished session will be removed. Your Photos library will not change.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if !appModel.permission.canRead {
+            PermissionEmptyState()
+        } else {
+            VStack(spacing: 0) {
+                if appModel.isPartialAccess { LimitedAccessBanner() }
+                if appModel.activeSession != nil { ResumeBanner(showingDiscardConfirmation: $showingDiscardConfirmation) }
+                Picker("Grouping", selection: Binding(
+                    get: { appModel.grouping },
+                    set: { appModel.grouping = $0 }
+                )) {
+                    ForEach(GroupKind.allCases, id: \.self) { kind in
+                        Text(kind.title).tag(kind)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.vertical, 10)
+
+                if appModel.isLoading && appModel.assets.isEmpty {
+                    Spacer()
+                    ProgressView("Reading your library…")
+                    Spacer()
+                } else if appModel.visibleGroups.isEmpty {
+                    ContentUnavailableView(
+                        "Nothing to clean",
+                        systemImage: "sparkles",
+                        description: Text("Accessible photos and videos will appear here.")
+                    )
+                } else {
+                    GroupList()
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if !appModel.selectedGroupIDs.isEmpty {
+                    Button {
+                        appModel.beginSelectedCleanup()
+                    } label: {
+                        VStack(spacing: 2) {
+                            Text("Clean \(appModel.selectedGroupIDs.count) groups")
+                                .font(.headline)
+                            Text("\(appModel.selectedUnresolvedCount) left to review")
+                                .font(.caption)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.glassProminent)
+                    .tint(RollSlashTheme.violet)
+                    .disabled(appModel.selectedUnresolvedCount == 0)
+                    .accessibilityIdentifier("clean-selected")
+                    .padding()
+                }
+            }
+        }
+    }
+}
+
+private struct PermissionEmptyState: View {
+    @Environment(AppModel.self) private var appModel
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Photo access needed", systemImage: "photo.badge.exclamationmark")
+        } description: {
+            Text("Roll Slash can only group and clean media you allow it to see.")
+        } actions: {
+            if appModel.permission == .notDetermined {
+                Button("Choose Photo Access") { Task { await appModel.requestAccess() } }
+                    .buttonStyle(.borderedProminent)
+            } else {
+                Button("Open Settings") { appModel.openSystemSettings() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+}
+
+private struct LimitedAccessBanner: View {
+    @Environment(AppModel.self) private var appModel
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "circle.lefthalf.filled")
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Showing selected photos only").font(.subheadline.bold())
+                Text("Counts do not include your full library.").font(.caption)
+            }
+            Spacer()
+            Button("Manage") { appModel.presentLimitedLibraryPicker() }
+                .buttonStyle(.bordered)
+        }
+        .padding(12)
+        .background(.orange.opacity(0.16), in: .rect(cornerRadius: 14))
+        .padding(.horizontal)
+    }
+}
+
+private struct ResumeBanner: View {
+    @Environment(AppModel.self) private var appModel
+    @Binding var showingDiscardConfirmation: Bool
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(appModel.activeSession?.status == .deleting ? "Deletion needs verification" : "Cleanup in progress")
+                    .font(.headline)
+                Text(appModel.activeSession?.status == .deleting ? "Full Photo Access is required to reconcile the result." : "\(appModel.sessionRemaining) items remaining")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if appModel.activeSession?.status == .deleting {
+                Button("Manage Access") { appModel.openSystemSettings() }
+                    .buttonStyle(.borderedProminent)
+            } else {
+                Button("Discard", role: .destructive) { showingDiscardConfirmation = true }
+                Button("Resume") { appModel.resumeSession() }.buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .background(.thinMaterial)
+    }
+}
+
+private struct GroupList: View {
+    @Environment(AppModel.self) private var appModel
+
+    var body: some View {
+        if appModel.grouping == .month {
+            MonthGroupList()
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    ForEach(appModel.locationGroups) { group in GroupRow(group: group) }
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 120)
+            }
+        }
+    }
+}
+
+private struct MonthGroupList: View {
+    @Environment(AppModel.self) private var appModel
+
+    private var sections: [(String, [MediaGroup])] {
+        let grouped = Dictionary(grouping: appModel.monthGroups) { MonthGrouping.year(for: $0.key.value) ?? String(localized: "Other") }
+        return grouped.map { ($0.key, $0.value) }.sorted {
+            if $0.0 == String(localized: "Other") { return false }
+            if $1.0 == String(localized: "Other") { return true }
+            return $0.0 > $1.0
+        }
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ZStack(alignment: .trailing) {
+                ScrollView {
+                    LazyVStack(alignment: .leading, pinnedViews: [.sectionHeaders]) {
+                        ForEach(sections, id: \.0) { year, groups in
+                            Section {
+                                ForEach(groups) { group in GroupRow(group: group) }
+                            } header: {
+                                Text(year)
+                                    .font(.title2.bold())
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.vertical, 6)
+                                    .background(Color(.systemGroupedBackground))
+                                    .id(year)
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.trailing, 40)
+                    .padding(.bottom, 120)
+                }
+                VStack(spacing: 8) {
+                    ForEach(sections, id: \.0) { year, _ in
+                        Button(year) {
+                            withAnimation { proxy.scrollTo(year, anchor: .top) }
+                        }
+                        .font(.caption2.bold())
+                        .foregroundStyle(RollSlashTheme.violet)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(.rect)
+                        .accessibilityLabel("Jump to \(year)")
+                    }
+                }
+                .padding(.trailing, 4)
+            }
+        }
+    }
+}
+
+private struct GroupRow: View {
+    @Environment(AppModel.self) private var appModel
+    let group: MediaGroup
+
+    private var selected: Bool { appModel.selectedGroupIDs.contains(group.id) }
+
+    var body: some View {
+        Button {
+            appModel.toggleSelection(group)
+        } label: {
+            HStack(spacing: 14) {
+                MediaThumbnailView(identifier: group.thumbnailAssetID, size: CGSize(width: 72, height: 72))
+                    .frame(width: 72, height: 72)
+                    .clipShape(.rect(cornerRadius: 18))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(group.title).font(.headline).foregroundStyle(.primary)
+                    if let subtitle = group.subtitle {
+                        Text(subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    if group.totalCount > 0 {
+                        ProgressView(value: Double(group.reviewedCount), total: Double(group.totalCount))
+                            .tint(group.isCleaned ? RollSlashTheme.keep : RollSlashTheme.violet)
+                    }
+                }
+                Spacer()
+                if group.isCleaned {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundStyle(RollSlashTheme.keep)
+                        .accessibilityLabel("Cleaned")
+                } else {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .font(.title2)
+                        .foregroundStyle(selected ? RollSlashTheme.violet : .secondary)
+                }
+            }
+            .padding(12)
+            .background(.background, in: .rect(cornerRadius: 22))
+            .overlay {
+                RoundedRectangle(cornerRadius: 22)
+                    .stroke(selected ? RollSlashTheme.violet : .clear, lineWidth: 2)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(group.unresolvedCount == 0)
+        .accessibilityIdentifier("group-row-\(group.key.id)")
+        .accessibilityValue(group.isCleaned ? "Cleaned" : "\(group.unresolvedCount) left to review")
+    }
+}
