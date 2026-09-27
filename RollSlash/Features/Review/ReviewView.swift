@@ -4,7 +4,7 @@ struct ReviewView: View {
     @Environment(AppModel.self) private var appModel
     @State private var focusedIdentifier: String?
 
-    private let columns = [GridItem(.adaptive(minimum: 78, maximum: 105), spacing: 3)]
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 3)
 
     var body: some View {
         NavigationStack {
@@ -105,8 +105,7 @@ private struct ReviewTile: View {
             Button(action: toggle) {
                 ZStack(alignment: .topTrailing) {
                     MediaThumbnailView(identifier: identifier, size: CGSize(width: 100, height: 100))
-                        .frame(maxWidth: .infinity)
-                        .aspectRatio(1, contentMode: .fill)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .clipped()
                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                         .font(.title3)
@@ -118,7 +117,7 @@ private struct ReviewTile: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .aspectRatio(1, contentMode: .fit)
+            .frame(maxWidth: .infinity)
             .accessibilityLabel(isSelected ? "Selected item for deletion" : "Kept item")
             .accessibilityValue(isSelected ? "Selected" : "Not selected")
             .accessibilityHint("Tap to \(isSelected ? "keep" : "select for deletion"); use the expand button to preview.")
@@ -137,5 +136,7 @@ private struct ReviewTile: View {
             .accessibilityIdentifier("preview-item-\(identifier)")
             .padding(6)
         }
+        .frame(maxWidth: .infinity)
+        .aspectRatio(1, contentMode: .fit)
     }
 }

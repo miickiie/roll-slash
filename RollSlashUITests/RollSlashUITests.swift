@@ -33,6 +33,12 @@ final class RollSlashUITests: XCTestCase {
         XCTAssertTrue(app.buttons["decision-delete"].waitForExistence(timeout: 3))
         app.buttons["decision-delete"].tap()
         XCTAssertTrue(app.navigationBars["Final review"].waitForExistence(timeout: 3))
+        let selectedTile = app.buttons["Selected item for deletion"].firstMatch
+        XCTAssertTrue(selectedTile.waitForExistence(timeout: 3))
+        selectedTile.tap()
+        XCTAssertTrue(app.staticTexts["0 selected for deletion"].waitForExistence(timeout: 3))
+        app.buttons["Kept item"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["1 selected for deletion"].waitForExistence(timeout: 3))
         app.buttons["commit-deletion"].tap()
         XCTAssertTrue(app.staticTexts["Freshly slashed"].waitForExistence(timeout: 3))
     }
