@@ -1,0 +1,260 @@
+import AVFoundation
+import Foundation
+import PhotosUI
+import SwiftData
+import Testing
+import UIKit
+@testable import RollSlash
+
+@MainActor
+@Suite("Cleanup flow")
+struct AppModelTests {
+    @Test("undo, redo, and branch replacement keep counts consistent")
+    func undoRedo() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+
+        #expect(harness.model.sessionTotal == 2)
+        harness.model.decide(.keep)
+        #expect(harness.model.keptCount == 1)
+        harness.model.undo()
+        #expect(harness.model.keptCount == 0)
+        #expect(harness.model.canRedo)
+        harness.model.redo()
+        #expect(harness.model.keptCount == 1)
+        harness.model.undo()
+        harness.model.decide(.deletePending)
+        #expect(!harness.model.canRedo)
+        #expect(harness.model.deleteCount == 1)
+    }
+
+    @Test("review decisions are global across grouping modes")
+    func globalDecisions() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+        harness.model.decide(.keep)
+        harness.model.decide(.keep)
+
+        #expect(harness.model.route == .completion)
+        let noLocation = try #require(harness.model.locationGroups.first { $0.key.value == "no-location" })
+        #expect(noLocation.totalCount == 3)
+        #expect(noLocation.unresolvedCount == 1)
+    }
+
+    @Test("failed deletion preserves review state for retry")
+    func deletionRetry() async throws {
+        let harness = try makeHarness(failDeletion: true)
+        await harness.model.start()
+        let february = try #require(harness.model.monthGroups.first { $0.key.value == "2026-02" })
+        harness.model.toggleSelection(february)
+        harness.model.beginSelectedCleanup()
+        harness.model.decide(.deletePending)
+
+        #expect(harness.model.route == .review)
+        await harness.model.commitDeletion()
+        #expect(harness.model.route == .review)
+        #expect(harness.model.activeSession?.status == .reviewing)
+        #expect(harness.model.errorMessage != nil)
+
+        harness.client.shouldFailDeletion = false
+        harness.model.errorMessage = nil
+        await harness.model.commitDeletion()
+        #expect(harness.model.route == .completion)
+        #expect(harness.model.activeSession == nil)
+        #expect(harness.client.deletedIdentifiers == ["feb"])
+    }
+
+    @Test("a submitted deletion reconciles from the Photos library before resuming")
+    func deletionRecovery() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let february = try #require(harness.model.monthGroups.first { $0.key.value == "2026-02" })
+        harness.model.toggleSelection(february)
+        harness.model.beginSelectedCleanup()
+        harness.model.decide(.deletePending)
+        let session = try #require(harness.model.activeSession)
+        session.status = .deleting
+        harness.client.assets.removeAll { $0.id == "feb" }
+
+        await harness.model.refreshAuthorization()
+
+        #expect(harness.model.activeSession == nil)
+        #expect(harness.model.route == .completion)
+    }
+
+    @Test("review selection supports keep all and select all")
+    func reviewSelection() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let february = try #require(harness.model.monthGroups.first { $0.key.value == "2026-02" })
+        harness.model.toggleSelection(february)
+        harness.model.beginSelectedCleanup()
+        harness.model.decide(.deletePending)
+
+        #expect(harness.model.reviewSelectedIDs == ["feb"])
+        harness.model.keepAllFromReview()
+        #expect(harness.model.reviewSelectedIDs.isEmpty)
+        harness.model.selectAllForDeletion()
+        #expect(harness.model.reviewSelectedIDs == ["feb"])
+        harness.model.keepAllFromReview()
+        await harness.model.commitDeletion()
+
+        #expect(harness.client.deletedIdentifiers.isEmpty)
+        #expect(harness.model.route == .completion)
+    }
+
+    @Test("permission changes refresh and clear inaccessible dashboard state")
+    func permissionRefresh() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        #expect(harness.model.assets.count == 3)
+
+        harness.client.permission = .limited
+        await harness.model.refreshAuthorization()
+        #expect(harness.model.isPartialAccess)
+        #expect(harness.model.assets.count == 3)
+
+        harness.client.permission = .denied
+        await harness.model.refreshAuthorization()
+        #expect(harness.model.assets.isEmpty)
+        #expect(harness.model.monthGroups.isEmpty)
+        #expect(harness.model.route == .dashboard)
+    }
+
+    @Test("limited access does not purge hidden asset decisions")
+    func limitedAccessPreservesDecisions() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let originalAssets = harness.client.assets
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+        harness.model.decide(.keep)
+
+        harness.client.permission = .limited
+        harness.client.assets = originalAssets.filter { $0.id == "feb" }
+        await harness.model.refreshAuthorization()
+
+        harness.client.permission = .full
+        harness.client.assets = originalAssets
+        await harness.model.refreshAuthorization()
+        let restoredJanuary = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        #expect(restoredJanuary.unresolvedCount == 1)
+    }
+
+    @Test("new historical media invalidates a cleaned group")
+    func historicalImportInvalidatesCompletion() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+        harness.model.decide(.keep)
+        harness.model.decide(.keep)
+        #expect(harness.model.monthGroups.first { $0.key.value == "2026-01" }?.isCleaned == true)
+
+        let calendar = Calendar(identifier: .gregorian)
+        harness.client.assets.append(makeAsset(
+            id: "jan-import",
+            date: calendar.date(from: DateComponents(year: 2026, month: 1, day: 10))!
+        ))
+        await harness.model.reloadLibrary()
+
+        let updatedJanuary = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        #expect(!updatedJanuary.isCleaned)
+        #expect(updatedJanuary.unresolvedCount == 1)
+    }
+
+    private func makeHarness(failDeletion: Bool = false) throws -> Harness {
+        let calendar = Calendar(identifier: .gregorian)
+        let assets = [
+            makeAsset(id: "jan-new", date: calendar.date(from: DateComponents(year: 2026, month: 1, day: 20))!),
+            makeAsset(id: "jan-old", date: calendar.date(from: DateComponents(year: 2026, month: 1, day: 2))!),
+            makeAsset(id: "feb", date: calendar.date(from: DateComponents(year: 2026, month: 2, day: 4))!)
+        ]
+        let client = TestPhotoLibraryClient(assets: assets, shouldFailDeletion: failDeletion)
+        let schema = Schema([
+            AssetDecisionRecord.self,
+            CleanupSessionRecord.self,
+            CleanupActionRecord.self,
+            GroupCompletionRecord.self,
+            LocationCacheRecord.self
+        ])
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(isStoredInMemoryOnly: true)]
+        )
+        let model = AppModel(
+            photoLibrary: client,
+            previewProvider: TestPreviewProvider(),
+            locationResolver: TestLocationResolver(),
+            modelContainer: container
+        )
+        return Harness(model: model, client: client)
+    }
+
+    private func makeAsset(id: String, date: Date) -> PhotoAssetDescriptor {
+        PhotoAssetDescriptor(
+            id: id,
+            creationDate: date,
+            coordinate: nil,
+            mediaKind: .photo,
+            duration: 0,
+            pixelWidth: 100,
+            pixelHeight: 100
+        )
+    }
+}
+
+@MainActor
+private struct Harness {
+    let model: AppModel
+    let client: TestPhotoLibraryClient
+}
+
+private enum TestError: Error { case deletionFailed }
+
+@MainActor
+private final class TestPhotoLibraryClient: PhotoLibraryClient {
+    var onLibraryChange: (@MainActor @Sendable () -> Void)?
+    var assets: [PhotoAssetDescriptor]
+    var shouldFailDeletion: Bool
+    var deletedIdentifiers: [String] = []
+    var permission: PhotoPermission = .full
+
+    init(assets: [PhotoAssetDescriptor], shouldFailDeletion: Bool) {
+        self.assets = assets
+        self.shouldFailDeletion = shouldFailDeletion
+    }
+
+    func authorizationStatus() -> PhotoPermission { permission }
+    func requestAuthorization() async -> PhotoPermission { permission }
+    func fetchAssets() async throws -> [PhotoAssetDescriptor] { assets }
+    func deleteAssets(with identifiers: [String]) async throws {
+        if shouldFailDeletion { throw TestError.deletionFailed }
+        deletedIdentifiers = identifiers
+        let deleted = Set(identifiers)
+        assets.removeAll { deleted.contains($0.id) }
+    }
+    func presentLimitedLibraryPicker() {}
+    func openSystemSettings() {}
+}
+
+@MainActor
+private final class TestPreviewProvider: MediaPreviewProvider {
+    func image(for identifier: String, targetSize: CGSize, kind: PreviewRequestKind) async -> UIImage? { nil }
+    func livePhoto(for identifier: String, targetSize: CGSize) async -> PHLivePhoto? { nil }
+    func playerItem(for identifier: String) async -> AVPlayerItem? { nil }
+    func startCaching(identifiers: [String], targetSize: CGSize) {}
+    func stopCachingAll() {}
+}
+
+private struct TestLocationResolver: LocationResolver {
+    func resolve(_ coordinate: GeoCoordinate) async throws -> ResolvedLocation? { nil }
+}
