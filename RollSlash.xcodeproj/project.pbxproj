@@ -10,6 +10,7 @@
 		05E4A698D6BE8B0188420799 /* DemoServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 724794E6DE266017FDBFD004 /* DemoServices.swift */; };
 		131116342A91313FDDBD21B5 /* MediaThumbnailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A88D0E1977A1F97A389C3B59 /* MediaThumbnailView.swift */; };
 		1738B2FDC3298A8379F97EA2 /* PhotoKitLibraryClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D0AF6AC5BE39B59DDFCA193 /* PhotoKitLibraryClient.swift */; };
+		18296BF65266B3FB5FDCF42A /* MediaViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7851BA9C180BFEC5B2A95853 /* MediaViewer.swift */; };
 		1BCF42EB136581FC11FB061F /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = E372FCEAD6AD3A927F4A0FD1 /* Localizable.xcstrings */; };
 		1CE14EB4F673249D7C4F74B3 /* GroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A8E7713B8D8E65E31D9D036 /* GroupingTests.swift */; };
 		24732D183C3D01946461ADB0 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF04A166021A7AE8F0B0123B /* AppModel.swift */; };
@@ -65,6 +66,7 @@
 		5CC4A6B8E4A05405326AF43E /* CompletionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompletionView.swift; sourceTree = "<group>"; };
 		724794E6DE266017FDBFD004 /* DemoServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoServices.swift; sourceTree = "<group>"; };
 		77C7FC77EAF5BB5F1517AE5C /* ReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewView.swift; sourceTree = "<group>"; };
+		7851BA9C180BFEC5B2A95853 /* MediaViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaViewer.swift; sourceTree = "<group>"; };
 		7CBDCD26AE26C7C7E9D0608C /* PhotoLibraryClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibraryClient.swift; sourceTree = "<group>"; };
 		9EA6D495B8F63F8D1088D2BA /* RollSlash.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = RollSlash.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2281AF28C956852C90A6A87 /* CleanupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CleanupView.swift; sourceTree = "<group>"; };
@@ -260,6 +262,7 @@
 			isa = PBXGroup;
 			children = (
 				A88D0E1977A1F97A389C3B59 /* MediaThumbnailView.swift */,
+				7851BA9C180BFEC5B2A95853 /* MediaViewer.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -405,6 +408,7 @@
 				56F7471760E56E3E7C3302A3 /* LocationResolver.swift in Sources */,
 				F96360A6A00F48B9C5C43C76 /* MediaPreviewProvider.swift in Sources */,
 				131116342A91313FDDBD21B5 /* MediaThumbnailView.swift in Sources */,
+				18296BF65266B3FB5FDCF42A /* MediaViewer.swift in Sources */,
 				CB23D5EF6466895B68527F11 /* OnboardingView.swift in Sources */,
 				1738B2FDC3298A8379F97EA2 /* PhotoKitLibraryClient.swift in Sources */,
 				EED4C89A39D88D332CD79403 /* PhotoLibraryClient.swift in Sources */,

@@ -66,12 +66,16 @@ struct ReviewView: View {
                 .padding()
                 .background(.ultraThinMaterial)
             }
-            .sheet(item: Binding(
-                get: { focusedIdentifier.map(PreviewIdentifier.init) },
-                set: { focusedIdentifier = $0?.id }
-            )) { item in
-                ReviewPreview(identifier: item.id)
-            }
+.fullScreenCover(item: Binding(
+    get: { focusedIdentifier.map(PreviewIdentifier.init) },
+    set: { focusedIdentifier = $0?.id }
+)) { item in
+    if let asset = appModel.assets.first(where: { $0.id == item.id }) {
+        MediaViewer(asset: asset)
+    } else {
+        ContentUnavailableView("Item unavailable", systemImage: "photo.badge.exclamationmark")
+    }
+}
             .alert("Deletion did not complete", isPresented: Binding(
                 get: { appModel.errorMessage != nil },
                 set: { if !$0 { appModel.errorMessage = nil } }
@@ -110,31 +114,6 @@ private struct ReviewTile: View {
                     .padding(7)
             }
             .accessibilityLabel(isSelected ? "Keep this item" : "Select this item for deletion")
-        }
-    }
-}
-
-private struct ReviewPreview: View {
-    @Environment(AppModel.self) private var appModel
-    @Environment(\.dismiss) private var dismiss
-    let identifier: String
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if let asset = appModel.assets.first(where: { $0.id == identifier }) {
-                    MediaCardView(asset: asset)
-                        .padding()
-                        .background(.black)
-                } else {
-                    ContentUnavailableView("Item unavailable", systemImage: "photo.badge.exclamationmark")
-                }
-            }
-            .navigationTitle("Preview")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
-            }
         }
     }
 }

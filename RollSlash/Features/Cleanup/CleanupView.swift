@@ -41,7 +41,7 @@ struct CleanupView: View {
                 Spacer()
                 VStack(spacing: 1) {
                     Text("\(appModel.sessionRemaining) left").font(.headline)
-                    Text("\(appModel.keptCount) kept  •  \(appModel.deleteCount) to review")
+            Text("\(appModel.keptCount) kept  •  \(appModel.deleteCount) to delete")
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.7))
                 }
@@ -93,7 +93,7 @@ struct CleanupView: View {
                             }
                     )
                     .accessibilityAction(named: "Keep") { appModel.decide(.keep) }
-                    .accessibilityAction(named: "Review for deletion") { appModel.decide(.deletePending) }
+                    .accessibilityAction(named: "Delete") { appModel.decide(.deletePending) }
             } else {
                 ProgressView().tint(.white)
             }
@@ -104,12 +104,12 @@ struct CleanupView: View {
     private var decisionButtons: some View {
         HStack(spacing: 34) {
             DecisionButton(
-                title: "Review",
+                title: "Delete",
                 icon: "xmark",
                 color: RollSlashTheme.coral,
-                accessibilityHint: "Stages this item for final deletion review"
+                accessibilityHint: "Stages this item for deletion. Photos is unchanged until final review."
             ) { appModel.decide(.deletePending) }
-            .accessibilityIdentifier("decision-review")
+            .accessibilityIdentifier("decision-delete")
             DecisionButton(
                 title: "Keep",
                 icon: "heart.fill",
@@ -138,7 +138,7 @@ private struct SwipeStamp: View {
     let decision: AssetDecision
 
     var body: some View {
-        Label(decision == .keep ? "KEEP" : "REVIEW", systemImage: decision == .keep ? "heart.fill" : "xmark")
+        Label(decision == .keep ? "KEEP" : "DELETE", systemImage: decision == .keep ? "heart.fill" : "xmark")
             .font(.title.bold())
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
@@ -181,6 +181,7 @@ struct MediaCardView: View {
     @State private var isMuted = true
     @State private var failed = false
     @State private var isVisible = false
+    @State private var showingViewer = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -201,6 +202,13 @@ struct MediaCardView: View {
                     HStack {
                         mediaBadge
                         Spacer()
+                        Button("Open full-screen preview", systemImage: "arrow.up.left.and.arrow.down.right") {
+                            showingViewer = true
+                        }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.glass)
+                        .accessibilityIdentifier("open-media-viewer")
+                        .accessibilityHint("Opens a preview where you can zoom and inspect details.")
                         if asset.mediaKind == .video {
                             Button(isMuted ? "Unmute" : "Mute", systemImage: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") {
                                 isMuted.toggle()
@@ -223,6 +231,9 @@ struct MediaCardView: View {
             }
             .clipShape(.rect(cornerRadius: 30))
             .task(id: asset.id) { await load(size: proxy.size) }
+            .fullScreenCover(isPresented: $showingViewer) {
+                MediaViewer(asset: asset)
+            }
             .onAppear {
                 isVisible = true
                 if asset.mediaKind == .video { player?.play() }
@@ -322,7 +333,7 @@ struct MediaCardView: View {
     }
 }
 
-private struct LivePhotoPlayer: UIViewRepresentable {
+struct LivePhotoPlayer: UIViewRepresentable {
     let photo: PHLivePhoto
     let isPlaying: Bool
 

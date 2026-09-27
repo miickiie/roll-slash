@@ -18,7 +18,7 @@ struct OnboardingView: View {
                     Text("Make room for what matters")
                         .font(.largeTitle.bold())
                         .multilineTextAlignment(.center)
-                    Text("Swipe to keep the good stuff, stage the rest, and review everything before Roll Slash asks Photos to delete it.")
+            Text("Swipe to keep the good stuff, stage deletion candidates, and confirm everything before Roll Slash asks Photos to delete it.")
                         .font(.title3)
                         .foregroundStyle(.white.opacity(0.76))
                         .multilineTextAlignment(.center)
@@ -26,7 +26,7 @@ struct OnboardingView: View {
                 .foregroundStyle(.white)
 
                 VStack(alignment: .leading, spacing: 16) {
-                    BenefitRow(icon: "hand.draw.fill", title: "Fast decisions", detail: "Swipe right to keep, left to review for deletion.")
+                    BenefitRow(icon: "hand.draw.fill", title: "Fast decisions", detail: "Swipe right to keep, left to delete later.")
                     BenefitRow(icon: "lock.shield.fill", title: "Private by design", detail: "Your originals stay in Photos. Roll Slash stores decisions only.")
                     BenefitRow(icon: "checkmark.circle.fill", title: "You stay in control", detail: "Nothing leaves your library without final review and Apple’s confirmation.")
                 }
