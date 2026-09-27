@@ -52,10 +52,19 @@ final class AppModel {
         visibleGroups.filter { selectedGroupIDs.contains($0.id) }
     }
 
-    var selectedUnresolvedCount: Int {
+    var selectedCandidateCount: Int {
         let decisions = (try? repository.allDecisions()) ?? [:]
-        let identifiers = Set(selectedGroups.flatMap(\.assetIDs))
-        return identifiers.filter { decisions[$0] == nil }.count
+        return selectedGroups.reduce(into: Set<String>()) { identifiers, group in
+            if group.isCleaned {
+                identifiers.formUnion(group.assetIDs)
+            } else {
+                identifiers.formUnion(group.assetIDs.filter { decisions[$0] == nil })
+            }
+        }.count
+    }
+
+    var selectedUnresolvedCount: Int {
+        selectedCandidateCount
     }
 
     var currentAsset: PhotoAssetDescriptor? {
@@ -173,7 +182,13 @@ final class AppModel {
             return
         }
         let decisions = (try? repository.allDecisions()) ?? [:]
-        let identifiers = Set(selectedGroups.flatMap(\.assetIDs)).filter { decisions[$0] == nil }
+        let identifiers = selectedGroups.reduce(into: Set<String>()) { identifiers, group in
+            if group.isCleaned {
+                identifiers.formUnion(group.assetIDs)
+            } else {
+                identifiers.formUnion(group.assetIDs.filter { decisions[$0] == nil })
+            }
+        }
         let ordered = assets
             .filter { identifiers.contains($0.id) }
             .sorted { ($0.creationDate ?? .distantPast) > ($1.creationDate ?? .distantPast) }
@@ -257,7 +272,7 @@ final class AppModel {
         guard let action = actions.first(where: { $0.sequence == sequence }) else { return }
         do {
             action.isApplied = false
-            try repository.removeDecision(for: action.assetIdentifier)
+            try repository.restoreOriginalDecision(for: action.assetIdentifier, in: session)
             session.cursor -= 1
             try repository.save()
             actions = try repository.actions(for: session.identifier)
@@ -404,6 +419,10 @@ final class AppModel {
     }
 
     func resetHistory() {
+        guard activeSession?.status != .deleting else {
+            errorMessage = String(localized: "Cleanup history cannot be reset while a deletion is being reconciled.")
+            return
+        }
         do {
             try repository.resetHistory()
             activeSession = nil

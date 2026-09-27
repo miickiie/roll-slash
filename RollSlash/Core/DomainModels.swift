@@ -90,6 +90,11 @@ enum AssetDecision: String, Codable, Sendable {
     case deletePending
 }
 
+struct SessionDecisionBaseline: Codable, Hashable, Sendable {
+    let assetIdentifier: String
+    let decision: AssetDecision?
+}
+
 enum CleanupSessionStatus: String, Codable, Sendable {
     case swiping
     case reviewing

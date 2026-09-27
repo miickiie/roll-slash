@@ -1,6 +1,18 @@
 import Foundation
 import SwiftData
 
+enum RollSlashSchema {
+    static var schema: Schema {
+        Schema([
+            AssetDecisionRecord.self,
+            CleanupSessionRecord.self,
+            CleanupActionRecord.self,
+            GroupCompletionRecord.self,
+            LocationCacheRecord.self
+        ])
+    }
+}
+
 @Model
 final class AssetDecisionRecord {
     @Attribute(.unique) var assetIdentifier: String
@@ -31,6 +43,7 @@ final class CleanupSessionRecord {
     var selectedGroupKeysData: Data
     var orderedAssetIDsData: Data
     var reviewSelectedIDsData: Data
+    var decisionBaselinesData: Data?
     var cursor: Int
     var statusRaw: String
     var createdAt: Date
@@ -41,6 +54,7 @@ final class CleanupSessionRecord {
         self.selectedGroupKeysData = Self.encode(selectedGroupKeys)
         self.orderedAssetIDsData = Self.encode(orderedAssetIDs)
         self.reviewSelectedIDsData = Self.encode([String]())
+        self.decisionBaselinesData = nil
         self.cursor = 0
         self.statusRaw = CleanupSessionStatus.swiping.rawValue
         self.createdAt = .now
@@ -58,6 +72,17 @@ final class CleanupSessionRecord {
     var reviewSelectedIDs: [String] {
         get { Self.decode([String].self, from: reviewSelectedIDsData) ?? [] }
         set { reviewSelectedIDsData = Self.encode(newValue) }
+    }
+    var decisionBaselines: [SessionDecisionBaseline]? {
+        get {
+            guard let data = decisionBaselinesData else { return nil }
+            return Self.decode([SessionDecisionBaseline].self, from: data)
+        }
+        set { decisionBaselinesData = newValue.map(Self.encode) }
+    }
+
+    func originalDecision(for assetIdentifier: String) -> AssetDecision? {
+        decisionBaselines?.first { $0.assetIdentifier == assetIdentifier }?.decision ?? nil
     }
     var status: CleanupSessionStatus {
         get { CleanupSessionStatus(rawValue: statusRaw) ?? .swiping }

@@ -6,6 +6,7 @@ protocol CleanupRepository: AnyObject {
     func allDecisions() throws -> [String: AssetDecision]
     func decision(for assetIdentifier: String) throws -> AssetDecision?
     func setDecision(_ decision: AssetDecision, for assetIdentifier: String, sessionIdentifier: UUID?) throws
+    func restoreOriginalDecision(for assetIdentifier: String, in session: CleanupSessionRecord) throws
     func removeDecision(for assetIdentifier: String) throws
     func removeDecisions(for assetIdentifiers: Set<String>) throws
     func activeSession() throws -> CleanupSessionRecord?
@@ -61,6 +62,27 @@ final class SwiftDataCleanupRepository: CleanupRepository {
         }
     }
 
+    private func removeDecisionWithoutSaving(for assetIdentifier: String) throws {
+        let descriptor = FetchDescriptor<AssetDecisionRecord>(
+            predicate: #Predicate { $0.assetIdentifier == assetIdentifier }
+        )
+        try context.fetch(descriptor).forEach(context.delete)
+    }
+
+    func restoreOriginalDecision(for assetIdentifier: String, in session: CleanupSessionRecord) throws {
+        if let baselines = session.decisionBaselines {
+            guard let baseline = baselines.first(where: { $0.assetIdentifier == assetIdentifier }) else { return }
+            if let decision = baseline.decision {
+                try upsertDecision(decision, for: assetIdentifier, sessionIdentifier: nil)
+            } else {
+                try removeDecisionWithoutSaving(for: assetIdentifier)
+            }
+        } else {
+            try removeDecisionWithoutSaving(for: assetIdentifier)
+        }
+        try context.save()
+    }
+
     func removeDecision(for assetIdentifier: String) throws {
         let descriptor = FetchDescriptor<AssetDecisionRecord>(predicate: #Predicate { $0.assetIdentifier == assetIdentifier })
         try context.fetch(descriptor).forEach(context.delete)
@@ -80,7 +102,12 @@ final class SwiftDataCleanupRepository: CleanupRepository {
     }
 
     func createSession(groupKind: GroupKind, selectedGroupKeys: [String], orderedAssetIDs: [String]) throws -> CleanupSessionRecord {
+        let existingDecisions = try allDecisions()
+        let baselines = orderedAssetIDs.map {
+            SessionDecisionBaseline(assetIdentifier: $0, decision: existingDecisions[$0])
+        }
         let session = CleanupSessionRecord(groupKind: groupKind, selectedGroupKeys: selectedGroupKeys, orderedAssetIDs: orderedAssetIDs)
+        session.decisionBaselines = baselines
         context.insert(session)
         try context.save()
         return session
@@ -149,8 +176,18 @@ final class SwiftDataCleanupRepository: CleanupRepository {
 
     func discard(session: CleanupSessionRecord) throws {
         let sessionID = session.identifier
-        let decisions = try context.fetch(FetchDescriptor<AssetDecisionRecord>(predicate: #Predicate { $0.sessionIdentifier == sessionID }))
-        decisions.forEach(context.delete)
+        if let baselines = session.decisionBaselines {
+            for baseline in baselines {
+                if let decision = baseline.decision {
+                    try upsertDecision(decision, for: baseline.assetIdentifier, sessionIdentifier: nil)
+                } else {
+                    try removeDecisionWithoutSaving(for: baseline.assetIdentifier)
+                }
+            }
+        } else {
+            let decisions = try context.fetch(FetchDescriptor<AssetDecisionRecord>(predicate: #Predicate { $0.sessionIdentifier == sessionID }))
+            decisions.forEach(context.delete)
+        }
         let actions = try context.fetch(FetchDescriptor<CleanupActionRecord>(predicate: #Predicate { $0.sessionIdentifier == sessionID }))
         actions.forEach(context.delete)
         context.delete(session)

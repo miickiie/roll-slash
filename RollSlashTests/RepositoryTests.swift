@@ -26,18 +26,44 @@ struct RepositoryTests {
         #expect(try repository.decision(for: "a") == nil)
     }
 
+    @Test("discard restores the session decision baseline")
+    func discardRestoresBaseline() throws {
+        let repository = SwiftDataCleanupRepository(container: try makeContainer())
+        try repository.setDecision(.keep, for: "a", sessionIdentifier: nil)
+        let session = try repository.createSession(
+            groupKind: .month,
+            selectedGroupKeys: ["month:2026-01"],
+            orderedAssetIDs: ["a", "b"]
+        )
+
+        try repository.setDecision(.deletePending, for: "a", sessionIdentifier: session.identifier)
+        try repository.setDecision(.keep, for: "b", sessionIdentifier: session.identifier)
+        try repository.discard(session: session)
+
+        #expect(try repository.decision(for: "a") == .keep)
+        #expect(try repository.decision(for: "b") == nil)
+    }
+
+    @Test("legacy sessions without a baseline still discard session decisions")
+    func legacySessionDiscard() throws {
+        let repository = SwiftDataCleanupRepository(container: try makeContainer())
+        let session = try repository.createSession(
+            groupKind: .month,
+            selectedGroupKeys: ["month:2026-01"],
+            orderedAssetIDs: ["a"]
+        )
+        session.decisionBaselinesData = nil
+        try repository.setDecision(.keep, for: "a", sessionIdentifier: session.identifier)
+
+        try repository.discard(session: session)
+
+        #expect(try repository.decision(for: "a") == nil)
+    }
+
     private func makeContainer() throws -> ModelContainer {
-        let schema = Schema([
-            AssetDecisionRecord.self,
-            CleanupSessionRecord.self,
-            CleanupActionRecord.self,
-            GroupCompletionRecord.self,
-            LocationCacheRecord.self
-        ])
         return try ModelContainer(
-            for: schema,
+            for: RollSlashSchema.schema,
             configurations: [ModelConfiguration(isStoredInMemoryOnly: true)]
         )
     }
 }
-

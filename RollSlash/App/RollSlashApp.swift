@@ -11,13 +11,7 @@ struct RollSlashApp: App {
         let processInfo = ProcessInfo.processInfo
         let isUITesting = processInfo.arguments.contains("--ui-testing")
         let isTesting = isUITesting || processInfo.environment["XCTestConfigurationFilePath"] != nil
-        let schema = Schema([
-            AssetDecisionRecord.self,
-            CleanupSessionRecord.self,
-            CleanupActionRecord.self,
-            GroupCompletionRecord.self,
-            LocationCacheRecord.self
-        ])
+    let schema = RollSlashSchema.schema
 
         do {
             let configuration = ModelConfiguration(isStoredInMemoryOnly: isTesting)

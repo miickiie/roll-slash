@@ -171,6 +171,107 @@ struct AppModelTests {
         #expect(updatedJanuary.unresolvedCount == 1)
     }
 
+    @Test("a cleaned group can be selected to review every accessible item again")
+    func cleanedGroupReviewAgain() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+        harness.model.decide(.keep)
+        harness.model.decide(.keep)
+        harness.model.finishCompletion()
+
+        let cleanedJanuary = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        #expect(cleanedJanuary.isCleaned)
+        harness.model.toggleSelection(cleanedJanuary)
+        #expect(harness.model.selectedCandidateCount == 2)
+        harness.model.beginSelectedCleanup()
+        #expect(harness.model.sessionTotal == 2)
+    }
+
+    @Test("cleaned and unfinished groups use the correct mixed candidate policy")
+    func mixedCandidatePolicy() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+        harness.model.decide(.keep)
+        harness.model.decide(.keep)
+        harness.model.finishCompletion()
+
+        let cleanedJanuary = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        let february = try #require(harness.model.monthGroups.first { $0.key.value == "2026-02" })
+        harness.model.toggleSelection(cleanedJanuary)
+        harness.model.toggleSelection(february)
+        #expect(harness.model.selectedCandidateCount == 3)
+        harness.model.beginSelectedCleanup()
+        #expect(harness.model.sessionTotal == 3)
+    }
+
+    @Test("undo and discard restore decisions that existed before review again")
+    func reviewAgainRestoresBaseline() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+        harness.model.decide(.keep)
+        harness.model.decide(.keep)
+        harness.model.finishCompletion()
+
+        let cleanedJanuary = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(cleanedJanuary)
+        harness.model.beginSelectedCleanup()
+        harness.model.decide(.deletePending)
+
+        let repository = SwiftDataCleanupRepository(container: harness.container)
+        #expect(try repository.decision(for: "jan-new") == .deletePending)
+        harness.model.undo()
+        #expect(try repository.decision(for: "jan-new") == .keep)
+        harness.model.redo()
+        #expect(try repository.decision(for: "jan-new") == .deletePending)
+        harness.model.discardActiveSession()
+        #expect(try repository.decision(for: "jan-new") == .keep)
+        #expect(try repository.decision(for: "jan-old") == .keep)
+    }
+
+    @Test("baseline restoration survives app relaunch")
+    func baselineSurvivesRelaunch() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+        harness.model.decide(.keep)
+        harness.model.decide(.keep)
+        harness.model.finishCompletion()
+
+        let cleanedJanuary = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(cleanedJanuary)
+        harness.model.beginSelectedCleanup()
+        harness.model.decide(.deletePending)
+
+        let relaunchedModel = AppModel(
+            photoLibrary: harness.client,
+            previewProvider: TestPreviewProvider(),
+            locationResolver: TestLocationResolver(),
+            modelContainer: harness.container
+        )
+        await relaunchedModel.start()
+        #expect(relaunchedModel.activeSession != nil)
+        relaunchedModel.discardActiveSession()
+
+        let repository = SwiftDataCleanupRepository(container: harness.container)
+        #expect(try repository.decision(for: "jan-new") == .keep)
+        #expect(try repository.decision(for: "jan-old") == .keep)
+    }
+
     private func makeHarness(failDeletion: Bool = false) throws -> Harness {
         let calendar = Calendar(identifier: .gregorian)
         let assets = [
@@ -179,15 +280,8 @@ struct AppModelTests {
             makeAsset(id: "feb", date: calendar.date(from: DateComponents(year: 2026, month: 2, day: 4))!)
         ]
         let client = TestPhotoLibraryClient(assets: assets, shouldFailDeletion: failDeletion)
-        let schema = Schema([
-            AssetDecisionRecord.self,
-            CleanupSessionRecord.self,
-            CleanupActionRecord.self,
-            GroupCompletionRecord.self,
-            LocationCacheRecord.self
-        ])
         let container = try ModelContainer(
-            for: schema,
+            for: RollSlashSchema.schema,
             configurations: [ModelConfiguration(isStoredInMemoryOnly: true)]
         )
         let model = AppModel(
@@ -196,7 +290,7 @@ struct AppModelTests {
             locationResolver: TestLocationResolver(),
             modelContainer: container
         )
-        return Harness(model: model, client: client)
+        return Harness(model: model, client: client, container: container)
     }
 
     private func makeAsset(id: String, date: Date) -> PhotoAssetDescriptor {
@@ -212,10 +306,11 @@ struct AppModelTests {
     }
 }
 
-@MainActor
-private struct Harness {
-    let model: AppModel
-    let client: TestPhotoLibraryClient
+    @MainActor
+    private struct Harness {
+        let model: AppModel
+        let client: TestPhotoLibraryClient
+        let container: ModelContainer
 }
 
 private enum TestError: Error { case deletionFailed }
