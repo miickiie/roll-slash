@@ -322,12 +322,13 @@ final class AppModel {
 
     func toggleReviewSelection(_ identifier: String) {
         guard let session = activeSession else { return }
-        var selected = Set(session.reviewSelectedIDs)
-        if selected.remove(identifier) == nil {
-            selected.insert(identifier)
-        }
+        let isSelected = !session.reviewSelectedIDs.contains(identifier)
         do {
-            try repository.updateReviewSelection(session: session, candidateIDs: reviewCandidateIDs, selectedIDs: selected)
+            try repository.updateReviewSelection(
+                session: session,
+                assetIdentifier: identifier,
+                isSelected: isSelected
+            )
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -441,10 +442,11 @@ final class AppModel {
         photoLibrary.openSystemSettings()
     }
 
-    func resetHistory() {
+    @discardableResult
+    func resetHistory() -> Bool {
         guard activeSession?.status != .deleting else {
             errorMessage = String(localized: "Cleanup history cannot be reset while a deletion is being reconciled.")
-            return
+            return false
         }
         do {
             try repository.resetHistory()
@@ -452,8 +454,10 @@ final class AppModel {
             actions = []
             selectedGroupIDs.removeAll()
             try rebuildGroups()
+            return true
         } catch {
             errorMessage = error.localizedDescription
+            return false
         }
     }
 

@@ -4,6 +4,7 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
     @State private var confirmingReset = false
+    @State private var showingResetSuccess = false
 
     var body: some View {
         NavigationStack {
@@ -21,32 +22,60 @@ struct SettingsView: View {
                     Label("Only Apple Photos, iCloud, and MapKit may use the network.", systemImage: "network")
                 }
                 Section("Cleanup History") {
-                    Button("Reset Cleanup History", role: .destructive) { confirmingReset = true }
-                        .disabled(appModel.activeSession?.status == .deleting)
-                        .popover(isPresented: $confirmingReset) {
-                            VStack(alignment: .leading, spacing: 14) {
-                                Text("Reset cleanup history?")
-                                    .font(.headline)
-                                Text("Your Photos library will not change.")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                HStack {
-                                    Spacer()
-                                    Button("Keep History") { confirmingReset = false }
-                                        .buttonStyle(.bordered)
-                                    Button("Reset History", role: .destructive) {
-                                        confirmingReset = false
-                                        appModel.resetHistory()
-                                    }
-                                    .buttonStyle(.borderedProminent)
-                                    .tint(RollSlashTheme.coral)
-                                }
-                            }
-                            .padding()
-                            .frame(width: 280)
-                            .presentationCompactAdaptation(.popover)
+                    Button("Reset Cleanup History", role: .destructive) {
+                        showingResetSuccess = false
+                        confirmingReset = true
+                    }
+        .disabled(appModel.activeSession?.status == .deleting)
+        .popover(isPresented: $confirmingReset) {
+            if showingResetSuccess {
+                VStack(alignment: .leading, spacing: 14) {
+                    Label("Cleanup history reset", systemImage: "checkmark.circle.fill")
+                        .font(.headline)
+                        .foregroundStyle(RollSlashTheme.keep)
+                    Text("Your Photos library was not changed.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Spacer()
+                        Button("Done") {
+                            showingResetSuccess = false
+                            confirmingReset = false
                         }
-                    Text("This forgets kept decisions and cleaned badges. It never deletes media from Photos.")
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding()
+                .frame(width: 280)
+                .presentationCompactAdaptation(.popover)
+            } else {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Reset cleanup history?")
+                        .font(.headline)
+                    Text("Your Photos library will not change.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Spacer()
+                        Button("Keep History") { confirmingReset = false }
+                            .buttonStyle(.bordered)
+                        Button("Reset History", role: .destructive) {
+                            if appModel.resetHistory() {
+                                showingResetSuccess = true
+                            } else {
+                                confirmingReset = false
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(RollSlashTheme.coral)
+                    }
+                }
+                .padding()
+                .frame(width: 280)
+                .presentationCompactAdaptation(.popover)
+            }
+        }
+        Text("This forgets kept decisions and cleaned badges. It never deletes media from Photos.")
                         .font(.caption)
                 }
                 Section("About") {
@@ -57,6 +86,14 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+            .alert("Roll Slash", isPresented: Binding(
+                get: { appModel.errorMessage != nil },
+                set: { if !$0 { appModel.errorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) { appModel.errorMessage = nil }
+            } message: {
+                Text(appModel.errorMessage ?? "")
             }
         }
     }

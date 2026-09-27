@@ -4,7 +4,7 @@ struct ReviewView: View {
     @Environment(AppModel.self) private var appModel
     @State private var focusedIdentifier: String?
 
-    private let columns = [GridItem(.adaptive(minimum: 105), spacing: 3)]
+    private let columns = [GridItem(.adaptive(minimum: 78, maximum: 105), spacing: 3)]
 
     var body: some View {
         NavigationStack {
@@ -101,21 +101,41 @@ private struct ReviewTile: View {
     let preview: () -> Void
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Button(action: preview) {
-                MediaThumbnailView(identifier: identifier, size: CGSize(width: 180, height: 180))
-                    .aspectRatio(1, contentMode: .fill)
+        ZStack(alignment: .bottomTrailing) {
+            Button(action: toggle) {
+                ZStack(alignment: .topTrailing) {
+                    MediaThumbnailView(identifier: identifier, size: CGSize(width: 100, height: 100))
+                        .frame(maxWidth: .infinity)
+                        .aspectRatio(1, contentMode: .fill)
+                        .clipped()
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, isSelected ? RollSlashTheme.coral : .black.opacity(0.5))
+                        .padding(7)
+                        .allowsHitTesting(false)
+                }
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Preview item")
-            Button(action: toggle) {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.title2)
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, isSelected ? RollSlashTheme.coral : .black.opacity(0.5))
-                    .padding(7)
+            .aspectRatio(1, contentMode: .fit)
+            .accessibilityLabel(isSelected ? "Selected item for deletion" : "Kept item")
+            .accessibilityValue(isSelected ? "Selected" : "Not selected")
+            .accessibilityHint("Tap to \(isSelected ? "keep" : "select for deletion"); use the expand button to preview.")
+            .accessibilityAction(named: isSelected ? "Keep" : "Select for deletion") {
+                toggle()
             }
-            .accessibilityLabel(isSelected ? "Keep this item" : "Select this item for deletion")
+            Button(action: preview) {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(.black.opacity(0.55), in: .circle)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Preview item full screen")
+            .accessibilityIdentifier("preview-item-\(identifier)")
+            .padding(6)
         }
     }
 }

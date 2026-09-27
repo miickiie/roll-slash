@@ -60,6 +60,27 @@ struct RepositoryTests {
         #expect(try repository.decision(for: "a") == nil)
     }
 
+    @Test("single review selection update changes only the tapped candidate")
+    func singleReviewSelectionUpdate() throws {
+        let repository = SwiftDataCleanupRepository(container: try makeContainer())
+        let session = try repository.createSession(
+            groupKind: .month,
+            selectedGroupKeys: ["month:2026-01"],
+            orderedAssetIDs: ["a", "b"]
+        )
+        try repository.updateReviewSelection(
+            session: session,
+            candidateIDs: ["a", "b"],
+            selectedIDs: ["a", "b"]
+        )
+
+        try repository.updateReviewSelection(session: session, assetIdentifier: "a", isSelected: false)
+
+        #expect(try repository.decision(for: "a") == .keep)
+        #expect(try repository.decision(for: "b") == .deletePending)
+        #expect(session.reviewSelectedIDs == ["b"])
+    }
+
     private func makeContainer() throws -> ModelContainer {
         return try ModelContainer(
             for: RollSlashSchema.schema,

@@ -16,6 +16,7 @@ protocol CleanupRepository: AnyObject {
     func trimActions(sessionIdentifier: UUID, from sequence: Int) throws
     func replaceActions(sessionIdentifier: UUID, actions: [CleanupActionSnapshot]) throws
     func updateReviewSelection(session: CleanupSessionRecord, candidateIDs: [String], selectedIDs: Set<String>) throws
+    func updateReviewSelection(session: CleanupSessionRecord, assetIdentifier: String, isSelected: Bool) throws
     func save() throws
     func discard(session: CleanupSessionRecord) throws
     func finish(session: CleanupSessionRecord) throws
@@ -167,6 +168,24 @@ final class SwiftDataCleanupRepository: CleanupRepository {
             )
         }
         session.reviewSelectedIDs = candidateIDs.filter(selectedIDs.contains)
+        try context.save()
+    }
+
+    func updateReviewSelection(session: CleanupSessionRecord, assetIdentifier: String, isSelected: Bool) throws {
+        try upsertDecision(
+            isSelected ? .deletePending : .keep,
+            for: assetIdentifier,
+            sessionIdentifier: session.identifier
+        )
+        var selected = session.reviewSelectedIDs
+        if isSelected {
+            if !selected.contains(assetIdentifier) {
+                selected.append(assetIdentifier)
+            }
+        } else {
+            selected.removeAll { $0 == assetIdentifier }
+        }
+        session.reviewSelectedIDs = selected
         try context.save()
     }
 
