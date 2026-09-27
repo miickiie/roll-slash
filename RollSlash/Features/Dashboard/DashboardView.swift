@@ -202,6 +202,10 @@ private struct GroupList: View {
 
 private struct MonthGroupList: View {
     @Environment(AppModel.self) private var appModel
+    private let columns = [
+        GridItem(.flexible(), spacing: 12),
+        GridItem(.flexible(), spacing: 12)
+    ]
 
     private var sections: [(String, [MediaGroup])] {
         let grouped = Dictionary(grouping: appModel.monthGroups) { MonthGrouping.year(for: $0.key.value) ?? String(localized: "Other") }
@@ -219,7 +223,11 @@ private struct MonthGroupList: View {
                     LazyVStack(alignment: .leading, pinnedViews: [.sectionHeaders]) {
                         ForEach(sections, id: \.0) { year, groups in
                             Section {
-                                ForEach(groups) { group in GroupRow(group: group) }
+                                LazyVGrid(columns: columns, spacing: 12) {
+                                    ForEach(groups) { group in
+                                        MonthGroupCard(group: group)
+                                    }
+                                }
                             } header: {
                                 Text(year)
                                     .font(.title2.bold())
@@ -248,6 +256,87 @@ private struct MonthGroupList: View {
                 }
                 .padding(.trailing, 4)
             }
+        }
+    }
+}
+
+private struct MonthGroupCard: View {
+    @Environment(AppModel.self) private var appModel
+    @State private var showingReviewAgainConfirmation = false
+    let group: MediaGroup
+
+    private var selected: Bool { appModel.selectedGroupIDs.contains(group.id) }
+
+    var body: some View {
+        Button {
+            if group.isCleaned && !selected {
+                showingReviewAgainConfirmation = true
+            } else {
+                appModel.toggleSelection(group)
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 9) {
+                MediaThumbnailView(identifier: group.thumbnailAssetID, size: CGSize(width: 180, height: 100))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 92)
+                    .clipShape(.rect(cornerRadius: 16))
+                HStack(alignment: .top, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(group.title)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        if let subtitle = group.subtitle {
+                            Text(subtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: selected
+                          ? "checkmark.circle.fill"
+                          : (group.isCleaned ? "checkmark.seal.fill" : "circle"))
+                        .font(.title3)
+                        .foregroundStyle(selected ? RollSlashTheme.violet : (group.isCleaned ? RollSlashTheme.keep : .secondary))
+                        .accessibilityLabel(group.isCleaned ? "Cleaned" : (selected ? "Selected" : "Not selected"))
+                }
+                if group.totalCount > 0 {
+                    ProgressView(value: Double(group.reviewedCount), total: Double(group.totalCount))
+                        .tint(group.isCleaned ? RollSlashTheme.keep : RollSlashTheme.violet)
+                }
+            }
+            .padding(10)
+            .background(.background, in: .rect(cornerRadius: 20))
+            .overlay {
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(selected ? RollSlashTheme.violet : .clear, lineWidth: 2)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(group.totalCount == 0)
+        .accessibilityIdentifier("group-row-\(group.key.id)")
+        .accessibilityValue(group.isCleaned ? (selected ? "Cleaned, selected to review again" : "Cleaned") : "\(group.unresolvedCount) left to review")
+        .popover(isPresented: $showingReviewAgainConfirmation) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Review \(group.title) again?")
+                    .font(.headline)
+                Text("All \(group.totalCount) accessible items in this group will be added to a new swipe session. Nothing is deleted until final review.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { showingReviewAgainConfirmation = false }
+                    Button("Review Again") {
+                        showingReviewAgainConfirmation = false
+                        appModel.toggleSelection(group)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding()
+            .frame(width: 300)
+            .presentationCompactAdaptation(.popover)
         }
     }
 }
