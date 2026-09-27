@@ -164,7 +164,7 @@ private struct ResumeBanner: View {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Discard the current cleanup?")
                     .font(.headline)
-                Text("All decisions made in this unfinished session will be removed. Your Photos library will not change.")
+                Text("Changes from this unfinished session will be discarded and prior review choices restored. Your Photos library will not change.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 HStack {

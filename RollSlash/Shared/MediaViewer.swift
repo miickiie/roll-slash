@@ -61,7 +61,16 @@ struct MediaViewer: View {
         case .photo:
             zoomedStill
         case .livePhoto:
-            if let livePhoto, zoomScale <= 1.001 {
+            if let livePhoto, let image {
+                ZStack {
+                    ZoomableImage(image: image, zoomScale: $zoomScale)
+                    if isLivePlaying && zoomScale <= 1.001 {
+                        LivePhotoPlayer(photo: livePhoto, isPlaying: true)
+                            .allowsHitTesting(false)
+                            .aspectRatio(contentMode: .fit)
+                    }
+                }
+            } else if let livePhoto {
                 LivePhotoPlayer(photo: livePhoto, isPlaying: isLivePlaying)
                     .aspectRatio(contentMode: .fit)
             } else {
