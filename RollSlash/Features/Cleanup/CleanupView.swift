@@ -6,6 +6,7 @@ struct CleanupView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dragOffset: CGSize = .zero
+    @State private var showingReviewNowConfirmation = false
 
     var body: some View {
         ZStack {
@@ -38,18 +39,48 @@ struct CleanupView: View {
                 Button("Close", systemImage: "chevron.down") { appModel.route = .dashboard }
                     .labelStyle(.iconOnly)
                     .buttonStyle(.glass)
-                Spacer()
-                VStack(spacing: 1) {
-                    Text("\(appModel.sessionRemaining) left").font(.headline)
-            Text("\(appModel.keptCount) kept  •  \(appModel.deleteCount) to delete")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.7))
-                }
-                Spacer()
-                Color.clear.frame(width: 44, height: 44)
+            Spacer()
+            VStack(spacing: 1) {
+                Text("\(appModel.sessionRemaining) left").font(.headline)
+                Text("\(appModel.keptCount) kept  •  \(appModel.deleteCount) to delete")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.7))
             }
-            ProgressView(value: Double(appModel.sessionCompleted), total: Double(max(appModel.sessionTotal, 1)))
-                .tint(RollSlashTheme.coral)
+            Spacer()
+            Button("Review deletes now", systemImage: "checkmark.seal") {
+                showingReviewNowConfirmation = true
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.glass)
+            .disabled(appModel.deleteCount == 0)
+            .accessibilityIdentifier("review-now")
+            .accessibilityHint("Review items currently marked for deletion now, while leaving unswiped items for later.")
+            .popover(isPresented: $showingReviewNowConfirmation) {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Review deletes now?")
+                        .font(.headline)
+                    Text("This reviews the \(appModel.deleteCount) item\(appModel.deleteCount == 1 ? "" : "s") currently marked for deletion. Unswiped items stay in this session for later.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Spacer()
+                        Button("Keep Swiping") { showingReviewNowConfirmation = false }
+                            .buttonStyle(.bordered)
+                        Button("Review Deletes") {
+                            showingReviewNowConfirmation = false
+                            appModel.reviewCurrentBatch()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(RollSlashTheme.coral)
+                    }
+                }
+                .padding()
+                .frame(width: 310)
+                .presentationCompactAdaptation(.popover)
+            }
+        }
+        ProgressView(value: Double(appModel.sessionCompleted), total: Double(max(appModel.sessionTotal, 1)))
+            .tint(RollSlashTheme.coral)
         }
     }
 

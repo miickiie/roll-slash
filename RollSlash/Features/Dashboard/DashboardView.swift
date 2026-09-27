@@ -169,11 +169,14 @@ private struct ResumeBanner: View {
                     .foregroundStyle(.secondary)
                 HStack {
                     Spacer()
-                    Button("Cancel") { showingDiscardConfirmation = false }
+                    Button("Keep Session") { showingDiscardConfirmation = false }
+                        .buttonStyle(.bordered)
                     Button("Discard Session", role: .destructive) {
                         showingDiscardConfirmation = false
                         appModel.discardActiveSession()
                     }
+                    .buttonStyle(.borderedProminent)
+                    .tint(RollSlashTheme.coral)
                 }
             }
             .padding()
@@ -327,7 +330,8 @@ private struct MonthGroupCard: View {
                     .foregroundStyle(.secondary)
                 HStack {
                     Spacer()
-                    Button("Cancel") { showingReviewAgainConfirmation = false }
+                    Button("Not Now") { showingReviewAgainConfirmation = false }
+                        .buttonStyle(.bordered)
                     Button("Review Again") {
                         showingReviewAgainConfirmation = false
                         appModel.toggleSelection(group)

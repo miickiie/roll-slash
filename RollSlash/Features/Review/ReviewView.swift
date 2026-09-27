@@ -53,7 +53,9 @@ struct ReviewView: View {
                 } label: {
                     HStack {
                         if appModel.isDeleting { ProgressView().tint(.white) }
-                        Text(appModel.reviewSelectedIDs.isEmpty ? "Finish without deleting" : "Delete \(appModel.reviewSelectedIDs.count) items")
+            Text(appModel.reviewSelectedIDs.isEmpty
+                 ? (appModel.sessionRemaining > 0 ? "Finish this batch" : "Finish without deleting")
+                 : "Delete \(appModel.reviewSelectedIDs.count) items")
                             .font(.headline)
                     }
                     .frame(maxWidth: .infinity)

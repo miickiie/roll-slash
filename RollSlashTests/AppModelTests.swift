@@ -272,6 +272,36 @@ struct AppModelTests {
         #expect(try repository.decision(for: "jan-old") == .keep)
     }
 
+    @Test("partial review deletes a batch and leaves the group unfinished")
+    func partialReviewBatch() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+        harness.model.decide(.deletePending)
+        #expect(harness.model.reviewCandidateIDs == ["jan-new"])
+
+        harness.model.reviewCurrentBatch()
+        #expect(harness.model.activeSession?.status == .reviewing)
+        #expect(harness.model.route == .review)
+
+        await harness.model.commitDeletion()
+
+        #expect(harness.model.activeSession == nil)
+        #expect(harness.model.route == .dashboard)
+        #expect(!harness.client.assets.contains { $0.id == "jan-new" })
+        let remainingJanuary = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        #expect(remainingJanuary.totalCount == 1)
+        #expect(remainingJanuary.unresolvedCount == 1)
+        #expect(!remainingJanuary.isCleaned)
+
+        harness.model.toggleSelection(remainingJanuary)
+        harness.model.beginSelectedCleanup()
+        #expect(harness.model.sessionTotal == 1)
+    }
+
     private func makeHarness(failDeletion: Bool = false) throws -> Harness {
         let calendar = Calendar(identifier: .gregorian)
         let assets = [

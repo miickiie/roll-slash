@@ -86,7 +86,7 @@ final class AppModel {
     }
 
     var reviewCandidateIDs: [String] {
-        actions.filter { $0.decision == .deletePending }.sorted { $0.sequence < $1.sequence }.map(\.assetIdentifier)
+        actions.filter { $0.isApplied && $0.decision == .deletePending }.sorted { $0.sequence < $1.sequence }.map(\.assetIdentifier)
     }
 
     var reviewSelectedIDs: Set<String> {
@@ -301,6 +301,24 @@ final class AppModel {
         }
     }
 
+    func reviewCurrentBatch() {
+        guard let session = activeSession, session.status == .swiping else { return }
+        let candidates = actions
+            .filter { $0.isApplied && $0.decision == .deletePending }
+            .sorted { $0.sequence < $1.sequence }
+            .map(\.assetIdentifier)
+        guard !candidates.isEmpty else { return }
+
+        do {
+            session.reviewSelectedIDs = candidates
+            session.status = .reviewing
+            try repository.save()
+            route = .review
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func toggleReviewSelection(_ identifier: String) {
         guard let session = activeSession else { return }
         var selected = Set(session.reviewSelectedIDs)
@@ -355,6 +373,7 @@ final class AppModel {
 
     func commitDeletion() async {
         guard let session = activeSession else { return }
+        let fullyReviewed = session.cursor >= session.orderedAssetIDs.count
         let selected = session.reviewSelectedIDs
         isDeleting = true
         defer { isDeleting = false }
@@ -386,9 +405,9 @@ final class AppModel {
 
         do {
             if !selected.isEmpty { try repository.removeDecisions(for: Set(selected)) }
-            try finalizeSession(session)
+            try finalizeSession(session, markGroupsCompleted: fullyReviewed)
             await reloadLibrary()
-            route = .completion
+            route = fullyReviewed ? .completion : .dashboard
         } catch {
             if selected.isEmpty {
                 session.status = .reviewing
@@ -445,22 +464,17 @@ final class AppModel {
                 errorMessage = error.localizedDescription
             }
         } else {
-            do {
-                session.reviewSelectedIDs = candidates
-                session.status = .reviewing
-                try repository.save()
-                route = .review
-            } catch {
-                errorMessage = error.localizedDescription
-            }
+            reviewCurrentBatch()
         }
     }
 
-    private func finalizeSession(_ session: CleanupSessionRecord) throws {
+    private func finalizeSession(_ session: CleanupSessionRecord, markGroupsCompleted: Bool = true) throws {
         let allGroups = monthGroups + locationGroups
-        for key in session.selectedGroupKeys {
-            let label = allGroups.first(where: { $0.key.id == key })?.title ?? key
-            try repository.markCompleted(groupKey: key, label: label)
+        if markGroupsCompleted {
+            for key in session.selectedGroupKeys {
+                let label = allGroups.first(where: { $0.key.id == key })?.title ?? key
+                try repository.markCompleted(groupKey: key, label: label)
+            }
         }
         try repository.finish(session: session)
         activeSession = nil
@@ -695,6 +709,7 @@ final class AppModel {
 
         let accessible = Set(assets.map(\.id))
         let submitted = Set(session.reviewSelectedIDs)
+        let fullyReviewed = session.cursor >= session.orderedAssetIDs.count
         let stillPresent = submitted.intersection(accessible)
         let confirmedMissing = submitted.subtracting(accessible)
         if !confirmedMissing.isEmpty {
@@ -702,8 +717,8 @@ final class AppModel {
         }
 
         if stillPresent.isEmpty {
-            try finalizeSession(session)
-            route = .completion
+            try finalizeSession(session, markGroupsCompleted: fullyReviewed)
+            route = fullyReviewed ? .completion : .dashboard
         } else {
             session.reviewSelectedIDs = session.reviewSelectedIDs.filter(stillPresent.contains)
             session.status = .reviewing

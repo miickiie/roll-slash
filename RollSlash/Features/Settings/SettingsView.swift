@@ -32,11 +32,14 @@ struct SettingsView: View {
                                     .foregroundStyle(.secondary)
                                 HStack {
                                     Spacer()
-                                    Button("Cancel") { confirmingReset = false }
+                                    Button("Keep History") { confirmingReset = false }
+                                        .buttonStyle(.bordered)
                                     Button("Reset History", role: .destructive) {
                                         confirmingReset = false
                                         appModel.resetHistory()
                                     }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(RollSlashTheme.coral)
                                 }
                             }
                             .padding()
