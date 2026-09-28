@@ -76,7 +76,7 @@ struct SettingsView: View {
                 }
                 Section("About") {
                     LabeledContent("Roll Slash", value: "1.0")
-                    Text("Built for iOS 26 and later.")
+                    Text("Built with 💜 by Miickiie")
                 }
             }
             .navigationTitle("Settings")
