@@ -11,6 +11,8 @@ struct MediaViewer: View {
     @Environment(\.dismiss) private var dismiss
 
     let asset: PhotoAssetDescriptor
+    var onSwipeLeft: (() -> Void)? = nil
+    var onSwipeRight: (() -> Void)? = nil
 
     @State private var image: UIImage?
     @State private var livePhoto: PHLivePhoto?
@@ -25,6 +27,7 @@ struct MediaViewer: View {
             Color.black.ignoresSafeArea()
             content
                 .ignoresSafeArea()
+                .id(asset.id)
 
             VStack {
                 HStack {
@@ -60,6 +63,12 @@ struct MediaViewer: View {
         }
         .task(id: asset.id) { await load() }
         .onDisappear { player?.pause() }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 24)
+                .onEnded { value in
+                    handleNavigationSwipe(value)
+                }
+        )
         .onLongPressGesture(minimumDuration: 0.1, pressing: { pressing in
             guard asset.mediaKind == .livePhoto, zoomScale <= 1.001 else { return }
             isLivePlaying = pressing
@@ -123,6 +132,12 @@ struct MediaViewer: View {
     }
 
     private func load() async {
+        player?.pause()
+        player = nil
+        image = nil
+        livePhoto = nil
+        isLivePlaying = false
+        zoomScale = 1
         failed = false
         let target = CGSize(width: 1600, height: 2200)
         image = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active)
@@ -143,6 +158,18 @@ struct MediaViewer: View {
             }
         }
         failed = image == nil && livePhoto == nil && player == nil
+    }
+
+    private func handleNavigationSwipe(_ value: DragGesture.Value) {
+        guard zoomScale <= 1.001 else { return }
+        guard abs(value.translation.width) > abs(value.translation.height) else { return }
+        guard abs(value.translation.width) >= 80 else { return }
+
+        if value.translation.width < 0 {
+            onSwipeLeft?()
+        } else {
+            onSwipeRight?()
+        }
     }
 }
 
