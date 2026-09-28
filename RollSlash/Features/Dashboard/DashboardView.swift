@@ -170,7 +170,7 @@ private struct CatHeadAndPaw: View {
                 path.closeSubpath()
             }
             .fill(.yellow)
-            .offset(x: -4, y: isBobbing ? -2 : 0)
+            .offset(x: -2, y: isBobbing ? -2 : 0)
             Path { path in
                 path.move(to: CGPoint(x: 16, y: 9))
                 path.addLine(to: CGPoint(x: 22, y: 3))
@@ -178,7 +178,7 @@ private struct CatHeadAndPaw: View {
                 path.closeSubpath()
             }
             .fill(.yellow)
-            .offset(x: -4, y: isBobbing ? -2 : 0)
+            .offset(x: -2, y: isBobbing ? -2 : 0)
             Capsule()
                 .fill(.yellow)
                 .frame(width: 21, height: 18)
