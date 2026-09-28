@@ -195,7 +195,7 @@ private struct CatHeadAndPaw: View {
                         .frame(width: 4, height: 2)
                         .offset(y: -3)
                 }
-                .offset(x: -4, y: isBobbing ? -2 : 0)
+                .offset(x: -5, y: isBobbing ? -2 : 0)
             Image(systemName: "pawprint.fill")
                 .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(.orange)
