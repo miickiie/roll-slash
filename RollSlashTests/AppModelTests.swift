@@ -385,7 +385,8 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
     func deleteAssets(with identifiers: [String]) async throws -> Set<String> {
         if shouldFailDeletion { throw TestError.deletionFailed }
         deletedIdentifiers = identifiers
-        let deleted = Set(identifiers)
+        let available = Set(assets.map(\.id))
+        let deleted = Set(identifiers).intersection(available)
         let result = deletionResultOverride ?? deleted
         assets.removeAll { result.contains($0.id) }
         return result

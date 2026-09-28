@@ -28,7 +28,7 @@ final class DemoPhotoLibraryClient: PhotoLibraryClient {
     func fetchAssets() async throws -> [PhotoAssetDescriptor] { assets }
 
     func deleteAssets(with identifiers: [String]) async throws -> Set<String> {
-        let deleted = Set(identifiers)
+        let deleted = Set(identifiers).intersection(Set(assets.map(\.id)))
         assets.removeAll { deleted.contains($0.id) }
         onLibraryChange?()
         return deleted
