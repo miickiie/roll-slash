@@ -164,56 +164,44 @@ private struct CatHeadAndPaw: View {
     var body: some View {
         ZStack {
             Path { path in
-                path.move(to: CGPoint(x: 7, y: 12))
-                path.addLine(to: CGPoint(x: 9, y: 3))
-                path.addLine(to: CGPoint(x: 16, y: 9))
+                path.move(to: CGPoint(x: 6, y: 11))
+                path.addLine(to: CGPoint(x: 8, y: 3))
+                path.addLine(to: CGPoint(x: 14, y: 9))
                 path.closeSubpath()
             }
             .fill(.yellow)
-            .offset(y: isBobbing ? -2 : 0)
+            .offset(x: -4, y: isBobbing ? -2 : 0)
             Path { path in
-                path.move(to: CGPoint(x: 20, y: 9))
-                path.addLine(to: CGPoint(x: 27, y: 3))
-                path.addLine(to: CGPoint(x: 29, y: 12))
+                path.move(to: CGPoint(x: 16, y: 9))
+                path.addLine(to: CGPoint(x: 22, y: 3))
+                path.addLine(to: CGPoint(x: 25, y: 11))
                 path.closeSubpath()
             }
             .fill(.yellow)
-            .offset(y: isBobbing ? -2 : 0)
+            .offset(x: -4, y: isBobbing ? -2 : 0)
             Capsule()
                 .fill(.yellow)
-                .frame(width: 22, height: 19)
+                .frame(width: 21, height: 18)
                 .overlay {
-                    ZStack {
-                        HStack(spacing: 6) {
-                            Circle().fill(.black).frame(width: 2.5, height: 2.5)
-                            Circle().fill(.black).frame(width: 2.5, height: 2.5)
-                        }
-                        .offset(y: -2)
-                        SmileShape()
-                            .stroke(.black, style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
-                            .frame(width: 8, height: 5)
-                            .offset(y: 4)
+                    HStack(spacing: 5) {
+                        Circle().fill(.black).frame(width: 2, height: 2)
+                        Circle().fill(.black).frame(width: 2, height: 2)
                     }
+                    .offset(y: -1)
                 }
-                .offset(y: isBobbing ? -2 : 0)
+                .overlay(alignment: .bottom) {
+                    Capsule()
+                        .fill(.pink.opacity(0.9))
+                        .frame(width: 4, height: 2)
+                        .offset(y: -3)
+                }
+                .offset(x: -4, y: isBobbing ? -2 : 0)
             Image(systemName: "pawprint.fill")
                 .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(.orange)
                 .rotationEffect(.degrees(isSlashing ? -35 : -12))
                 .offset(x: 5, y: isSlashing ? 4 : 7)
         }
-    }
-}
-
-private struct SmileShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        path.move(to: CGPoint(x: rect.minX, y: rect.minY + 1))
-        path.addQuadCurve(
-            to: CGPoint(x: rect.maxX, y: rect.minY + 1),
-            control: CGPoint(x: rect.midX, y: rect.maxY + 2)
-        )
-        return path
     }
 }
 
