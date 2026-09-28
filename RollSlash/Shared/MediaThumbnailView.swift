@@ -15,6 +15,7 @@ struct MediaThumbnailView: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if identifier == nil {
                 Image(systemName: "sparkles")
                     .foregroundStyle(.secondary)

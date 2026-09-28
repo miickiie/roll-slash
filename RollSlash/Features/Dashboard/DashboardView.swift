@@ -281,7 +281,7 @@ private struct MonthGroupCard: View {
             VStack(alignment: .leading, spacing: 9) {
                 MediaThumbnailView(identifier: group.thumbnailAssetID, size: CGSize(width: 180, height: 100))
                     .frame(maxWidth: .infinity)
-                    .aspectRatio(1.8, contentMode: .fit)
+                    .frame(height: 92)
                     .clipShape(.rect(cornerRadius: 16))
                 HStack(alignment: .top, spacing: 8) {
                     VStack(alignment: .leading, spacing: 3) {
