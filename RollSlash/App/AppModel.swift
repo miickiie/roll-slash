@@ -560,7 +560,7 @@ final class AppModel {
         let decisions = decisionsByAssetID
         let bucketLocations = bucketLocations
         let result = await Task.detached(priority: .userInitiated) {
-            Self.buildGroups(
+            await Self.buildGroups(
                 assets: assets,
                 decisions: decisions,
                 completions: completions,
@@ -573,9 +573,13 @@ final class AppModel {
     }
 
     private func completionSnapshots() throws -> [String: GroupCompletionSnapshot] {
-        try repository.completedGroups().reduce(into: [:]) { result, record in
-            result[record.groupKey] = GroupCompletionSnapshot(groupKey: record.groupKey, lastLabel: record.lastLabel)
+        let records = try repository.completedGroups()
+        var snapshots: [String: GroupCompletionSnapshot] = [:]
+        snapshots.reserveCapacity(records.count)
+        for (key, record) in records {
+            snapshots[key] = GroupCompletionSnapshot(groupKey: record.groupKey, lastLabel: record.lastLabel)
         }
+        return snapshots
     }
 
     private static func buildGroups(
