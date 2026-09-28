@@ -261,37 +261,39 @@ private struct ReviewTile: View {
     let preview: () -> Void
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Button(action: preview) {
-                MediaThumbnailView(identifier: identifier, size: CGSize(width: 140, height: 96))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
-                    .contentShape(Rectangle())
+        GeometryReader { proxy in
+            ZStack(alignment: .topTrailing) {
+                Button(action: preview) {
+                    MediaThumbnailView(identifier: identifier, size: CGSize(width: 140, height: 96))
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .frame(width: proxy.size.width, height: proxy.size.height)
+                .clipShape(.rect(cornerRadius: 8))
+                .accessibilityLabel("Preview photo")
+                .accessibilityIdentifier("review-preview-\(identifier)")
+                .accessibilityHint("Opens a full-screen preview. Swipe left for the next item or right for the previous item.")
+                Button(action: toggle) {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, isSelected ? RollSlashTheme.coral : .black.opacity(0.65))
+                        .padding(7)
+                        .background(.black.opacity(0.18), in: .circle)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isSelected ? "Selected item for deletion" : "Kept item")
+                .accessibilityValue(isSelected ? "Selected" : "Not selected")
+                .accessibilityHint("Tap to \(isSelected ? "keep" : "select for deletion").")
+                .accessibilityIdentifier("review-selection-\(identifier)")
+                .padding(4)
             }
-            .buttonStyle(.plain)
-            .frame(maxWidth: .infinity)
-            .frame(height: tileHeight)
-            .clipShape(.rect(cornerRadius: 8))
-            .accessibilityLabel("Preview photo")
-            .accessibilityIdentifier("review-preview-\(identifier)")
-            .accessibilityHint("Opens a full-screen preview. Swipe left for the next item or right for the previous item.")
-            Button(action: toggle) {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.title3)
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, isSelected ? RollSlashTheme.coral : .black.opacity(0.65))
-                    .padding(7)
-                    .background(.black.opacity(0.18), in: .circle)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isSelected ? "Selected item for deletion" : "Kept item")
-            .accessibilityValue(isSelected ? "Selected" : "Not selected")
-            .accessibilityHint("Tap to \(isSelected ? "keep" : "select for deletion").")
-            .accessibilityIdentifier("review-selection-\(identifier)")
-            .padding(4)
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .clipped()
         }
-        .frame(maxWidth: .infinity)
         .frame(height: tileHeight)
     }
 }
