@@ -4,7 +4,7 @@ struct ReviewView: View {
     @Environment(AppModel.self) private var appModel
     @State private var focusedIdentifier: String?
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 3)
+    private let columns = Array(repeating: GridItem(.flexible(minimum: 72, maximum: 110), spacing: 4), count: 4)
 
     var body: some View {
         NavigationStack {
@@ -33,6 +33,7 @@ struct ReviewView: View {
                             }
                         }
                     }
+                    .padding(.horizontal, 4)
                 }
             }
             .navigationTitle("Final review")
@@ -108,10 +109,10 @@ private struct ReviewTile: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .clipped()
                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .font(.title3)
+                        .font(.caption)
                         .symbolRenderingMode(.palette)
                         .foregroundStyle(.white, isSelected ? RollSlashTheme.coral : .black.opacity(0.5))
-                        .padding(7)
+                        .padding(5)
                         .allowsHitTesting(false)
                 }
                 .contentShape(Rectangle())
@@ -126,9 +127,9 @@ private struct ReviewTile: View {
             }
             Button(action: preview) {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    .font(.caption.weight(.bold))
+                    .font(.caption2.weight(.bold))
                     .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
+                    .frame(width: 30, height: 30)
                     .background(.black.opacity(0.55), in: .circle)
             }
             .buttonStyle(.plain)

@@ -27,7 +27,7 @@ struct SettingsView: View {
                         confirmingReset = true
                     }
         .disabled(appModel.activeSession?.status == .deleting)
-        .popover(isPresented: $confirmingReset) {
+        .sheet(isPresented: $confirmingReset, onDismiss: { showingResetSuccess = false }) {
             if showingResetSuccess {
                 VStack(alignment: .leading, spacing: 14) {
                     Label("Cleanup history reset", systemImage: "checkmark.circle.fill")
@@ -46,8 +46,9 @@ struct SettingsView: View {
                     }
                 }
                 .padding()
-                .frame(width: 280)
-                .presentationCompactAdaptation(.popover)
+                .frame(maxWidth: .infinity)
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
             } else {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("Reset cleanup history?")
@@ -71,8 +72,9 @@ struct SettingsView: View {
                     }
                 }
                 .padding()
-                .frame(width: 280)
-                .presentationCompactAdaptation(.popover)
+                .frame(maxWidth: .infinity)
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
             }
         }
         Text("This forgets kept decisions and cleaned badges. It never deletes media from Photos.")

@@ -55,7 +55,7 @@ struct CleanupView: View {
             .disabled(appModel.deleteCount == 0)
             .accessibilityIdentifier("review-now")
             .accessibilityHint("Review items currently marked for deletion now, while leaving unswiped items for later.")
-            .popover(isPresented: $showingReviewNowConfirmation) {
+            .sheet(isPresented: $showingReviewNowConfirmation) {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("Review deletes now?")
                         .font(.headline)
@@ -68,15 +68,19 @@ struct CleanupView: View {
                             .buttonStyle(.bordered)
                         Button("Review Deletes") {
                             showingReviewNowConfirmation = false
-                            appModel.reviewCurrentBatch()
+                            Task { @MainActor in
+                                await Task.yield()
+                                appModel.reviewCurrentBatch()
+                            }
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(RollSlashTheme.coral)
                     }
                 }
                 .padding()
-                .frame(width: 310)
-                .presentationCompactAdaptation(.popover)
+                .frame(maxWidth: .infinity)
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
             }
         }
         ProgressView(value: Double(appModel.sessionCompleted), total: Double(max(appModel.sessionTotal, 1)))

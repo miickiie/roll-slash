@@ -150,7 +150,7 @@ private struct ResumeBanner: View {
                     .buttonStyle(.borderedProminent)
             } else {
                 Button("Discard", role: .destructive) { showingDiscardConfirmation = true }
-                    .popover(isPresented: $showingDiscardConfirmation) {
+                    .sheet(isPresented: $showingDiscardConfirmation) {
                         discardConfirmation
                     }
                 Button("Resume") { appModel.resumeSession() }.buttonStyle(.borderedProminent)
@@ -180,8 +180,9 @@ private struct ResumeBanner: View {
                 }
             }
             .padding()
-            .frame(width: 300)
-            .presentationCompactAdaptation(.popover)
+            .frame(maxWidth: .infinity)
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
     }
 }
 
@@ -321,7 +322,7 @@ private struct MonthGroupCard: View {
         .disabled(group.totalCount == 0)
         .accessibilityIdentifier("group-row-\(group.key.id)")
         .accessibilityValue(group.isCleaned ? (selected ? "Cleaned, selected to review again" : "Cleaned") : "\(group.unresolvedCount) left to review")
-        .popover(isPresented: $showingReviewAgainConfirmation) {
+        .sheet(isPresented: $showingReviewAgainConfirmation) {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Review \(group.title) again?")
                     .font(.headline)
@@ -340,8 +341,9 @@ private struct MonthGroupCard: View {
                 }
             }
             .padding()
-            .frame(width: 300)
-            .presentationCompactAdaptation(.popover)
+            .frame(maxWidth: .infinity)
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
         }
     }
 }
@@ -394,7 +396,7 @@ private struct GroupRow: View {
         .disabled(group.totalCount == 0)
         .accessibilityIdentifier("group-row-\(group.key.id)")
         .accessibilityValue(group.isCleaned ? (selected ? "Cleaned, selected to review again" : "Cleaned") : "\(group.unresolvedCount) left to review")
-        .popover(isPresented: $showingReviewAgainConfirmation) {
+        .sheet(isPresented: $showingReviewAgainConfirmation) {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Review \(group.title) again?")
                     .font(.headline)
@@ -412,8 +414,9 @@ private struct GroupRow: View {
                 }
             }
             .padding()
-            .frame(width: 300)
-            .presentationCompactAdaptation(.popover)
+            .frame(maxWidth: .infinity)
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
         }
     }
 }
