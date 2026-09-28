@@ -560,7 +560,7 @@ final class AppModel {
         let decisions = decisionsByAssetID
         let bucketLocations = bucketLocations
         let result = await Task.detached(priority: .userInitiated) {
-            await Self.buildGroups(
+            Self.buildGroups(
                 assets: assets,
                 decisions: decisions,
                 completions: completions,
@@ -582,7 +582,7 @@ final class AppModel {
         return snapshots
     }
 
-    private static func buildGroups(
+    nonisolated private static func buildGroups(
         assets: [PhotoAssetDescriptor],
         decisions: [String: AssetDecision],
         completions: [String: GroupCompletionSnapshot],
@@ -599,7 +599,7 @@ final class AppModel {
         )
     }
 
-    private static func buildMonthGroups(
+    nonisolated private static func buildMonthGroups(
         assets: [PhotoAssetDescriptor],
         decisions: [String: AssetDecision],
         completions: [String: GroupCompletionSnapshot]
@@ -640,7 +640,7 @@ final class AppModel {
         }
     }
 
-    private static func buildLocationGroups(
+    nonisolated private static func buildLocationGroups(
         assets: [PhotoAssetDescriptor],
         decisions: [String: AssetDecision],
         completions: [String: GroupCompletionSnapshot],
@@ -726,7 +726,7 @@ final class AppModel {
         }
     }
 
-    private static func itemCountText(_ count: Int) -> String {
+    nonisolated private static func itemCountText(_ count: Int) -> String {
         count == 1 ? String(localized: "1 item") : String(localized: "\(count) items")
     }
 
