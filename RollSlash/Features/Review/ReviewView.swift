@@ -16,6 +16,19 @@ struct ReviewView: View {
         return !candidates.isEmpty && candidates.isSubset(of: appModel.reviewSelectedIDs)
     }
 
+    private var selectAllBinding: Binding<Bool> {
+        Binding(
+            get: { allCandidatesSelected },
+            set: { newValue in
+                if newValue {
+                    appModel.selectAllForDeletion()
+                } else {
+                    appModel.keepAllFromReview()
+                }
+            }
+        )
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -23,13 +36,21 @@ struct ReviewView: View {
                     Text("\(appModel.reviewSelectedIDs.count) selected for deletion")
                         .font(.subheadline.bold())
                     Spacer()
-                    Button("Select All", systemImage: "checkmark.circle") {
-                        appModel.selectAllForDeletion()
+                    Toggle(isOn: selectAllBinding) {
+                        Label(
+                            "Select All",
+                            systemImage: allCandidatesSelected ? "checkmark.circle.fill" : "checkmark.circle"
+                        )
                     }
+                    .toggleStyle(.button)
                     .buttonStyle(.bordered)
-                    .disabled(allCandidatesSelected || appModel.reviewCandidateIDs.isEmpty)
+                    .disabled(appModel.reviewCandidateIDs.isEmpty)
                     .accessibilityIdentifier("select-all")
-                    .accessibilityHint("Select every item currently marked for deletion.")
+                    .accessibilityHint(
+                        allCandidatesSelected
+                            ? "Keeps every item in this review."
+                            : "Selects every item in this review for deletion."
+                    )
                 }
                 .padding()
 
