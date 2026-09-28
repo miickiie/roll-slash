@@ -27,54 +27,50 @@ struct SettingsView: View {
                         confirmingReset = true
                     }
         .disabled(appModel.activeSession?.status == .deleting)
-        .sheet(isPresented: $confirmingReset, onDismiss: { showingResetSuccess = false }) {
-            if showingResetSuccess {
-                VStack(alignment: .leading, spacing: 14) {
-                    Label("Cleanup history reset", systemImage: "checkmark.circle.fill")
-                        .font(.headline)
-                        .foregroundStyle(RollSlashTheme.keep)
-                    Text("Your Photos library was not changed.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    HStack {
-                        Spacer()
-                        Button("Done") {
-                            showingResetSuccess = false
-                            confirmingReset = false
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                }
-                .padding()
-                .frame(maxWidth: .infinity)
-                .presentationDetents([.medium])
-                .presentationDragIndicator(.visible)
-            } else {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text("Reset cleanup history?")
-                        .font(.headline)
-                    Text("Your Photos library will not change.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    HStack {
-                        Spacer()
-                        Button("Keep History") { confirmingReset = false }
-                            .buttonStyle(.bordered)
-                        Button("Reset History", role: .destructive) {
-                            if appModel.resetHistory() {
-                                showingResetSuccess = true
-                            } else {
+        .fullScreenCover(isPresented: $confirmingReset, onDismiss: { showingResetSuccess = false }) {
+            PopupModal {
+                if showingResetSuccess {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Label("Cleanup history reset", systemImage: "checkmark.circle.fill")
+                            .font(.headline)
+                            .foregroundStyle(RollSlashTheme.keep)
+                        Text("Your Photos library was not changed.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Spacer()
+                            Button("Done") {
+                                showingResetSuccess = false
                                 confirmingReset = false
                             }
+                            .buttonStyle(.borderedProminent)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(RollSlashTheme.coral)
                     }
+                    .padding()
+                } else {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("Reset cleanup history?")
+                            .font(.headline)
+                        Text("Your Photos library will not change.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Spacer()
+                            Button("Keep History") { confirmingReset = false }
+                                .buttonStyle(.bordered)
+                            Button("Reset History", role: .destructive) {
+                                if appModel.resetHistory() {
+                                    showingResetSuccess = true
+                                } else {
+                                    confirmingReset = false
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(RollSlashTheme.coral)
+                        }
+                    }
+                    .padding()
                 }
-                .padding()
-                .frame(maxWidth: .infinity)
-                .presentationDetents([.medium])
-                .presentationDragIndicator(.visible)
             }
         }
         Text("This forgets kept decisions and cleaned badges. It never deletes media from Photos.")

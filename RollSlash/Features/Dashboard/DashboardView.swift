@@ -150,8 +150,10 @@ private struct ResumeBanner: View {
                     .buttonStyle(.borderedProminent)
             } else {
                 Button("Discard", role: .destructive) { showingDiscardConfirmation = true }
-                    .sheet(isPresented: $showingDiscardConfirmation) {
-                        discardConfirmation
+                    .fullScreenCover(isPresented: $showingDiscardConfirmation) {
+                        PopupModal {
+                            discardConfirmation
+                        }
                     }
                 Button("Resume") { appModel.resumeSession() }.buttonStyle(.borderedProminent)
             }
@@ -180,9 +182,6 @@ private struct ResumeBanner: View {
                 }
             }
             .padding()
-            .frame(maxWidth: .infinity)
-            .presentationDetents([.medium])
-            .presentationDragIndicator(.visible)
     }
 }
 
@@ -322,28 +321,27 @@ private struct MonthGroupCard: View {
         .disabled(group.totalCount == 0)
         .accessibilityIdentifier("group-row-\(group.key.id)")
         .accessibilityValue(group.isCleaned ? (selected ? "Cleaned, selected to review again" : "Cleaned") : "\(group.unresolvedCount) left to review")
-        .sheet(isPresented: $showingReviewAgainConfirmation) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Review \(group.title) again?")
-                    .font(.headline)
-                Text("All \(group.totalCount) accessible items in this group will be added to a new swipe session. Nothing is deleted until final review.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                HStack {
-                    Spacer()
-                    Button("Not Now") { showingReviewAgainConfirmation = false }
-                        .buttonStyle(.bordered)
-                    Button("Review Again") {
-                        showingReviewAgainConfirmation = false
-                        appModel.toggleSelection(group)
+        .fullScreenCover(isPresented: $showingReviewAgainConfirmation) {
+            PopupModal {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Review \(group.title) again?")
+                        .font(.headline)
+                    Text("All \(group.totalCount) accessible items in this group will be added to a new swipe session. Nothing is deleted until final review.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Spacer()
+                        Button("Not Now") { showingReviewAgainConfirmation = false }
+                            .buttonStyle(.bordered)
+                        Button("Review Again") {
+                            showingReviewAgainConfirmation = false
+                            appModel.toggleSelection(group)
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
-                    .buttonStyle(.borderedProminent)
                 }
+                .padding()
             }
-            .padding()
-            .frame(maxWidth: .infinity)
-            .presentationDetents([.medium])
-            .presentationDragIndicator(.visible)
         }
     }
 }
@@ -396,27 +394,27 @@ private struct GroupRow: View {
         .disabled(group.totalCount == 0)
         .accessibilityIdentifier("group-row-\(group.key.id)")
         .accessibilityValue(group.isCleaned ? (selected ? "Cleaned, selected to review again" : "Cleaned") : "\(group.unresolvedCount) left to review")
-        .sheet(isPresented: $showingReviewAgainConfirmation) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Review \(group.title) again?")
-                    .font(.headline)
-                Text("All \(group.totalCount) accessible items in this group will be added to a new swipe session. Nothing is deleted until final review.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                HStack {
-                    Spacer()
-                    Button("Cancel") { showingReviewAgainConfirmation = false }
-                    Button("Review Again") {
-                        showingReviewAgainConfirmation = false
-                        appModel.toggleSelection(group)
+        .fullScreenCover(isPresented: $showingReviewAgainConfirmation) {
+            PopupModal {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Review \(group.title) again?")
+                        .font(.headline)
+                    Text("All \(group.totalCount) accessible items in this group will be added to a new swipe session. Nothing is deleted until final review.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Spacer()
+                        Button("Cancel") { showingReviewAgainConfirmation = false }
+                            .buttonStyle(.bordered)
+                        Button("Review Again") {
+                            showingReviewAgainConfirmation = false
+                            appModel.toggleSelection(group)
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
-                    .buttonStyle(.borderedProminent)
                 }
+                .padding()
             }
-            .padding()
-            .frame(maxWidth: .infinity)
-            .presentationDetents([.medium])
-            .presentationDragIndicator(.visible)
         }
     }
 }
