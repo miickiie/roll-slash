@@ -205,10 +205,10 @@ private struct GroupList: View {
 private struct MonthGroupList: View {
     @Environment(AppModel.self) private var appModel
     private let columns = [
-        GridItem(.flexible(), spacing: 12),
-        GridItem(.flexible(), spacing: 12)
+        GridItem(.flexible(minimum: 0), spacing: 12, alignment: .top),
+        GridItem(.flexible(minimum: 0), spacing: 12, alignment: .top)
     ]
-    private let singleColumn = [GridItem(.flexible())]
+    private let singleColumn = [GridItem(.flexible(minimum: 0), alignment: .top)]
 
     private var sections: [(String, [MediaGroup])] {
         let grouped = Dictionary(grouping: appModel.monthGroups) { MonthGrouping.year(for: $0.key.value) ?? String(localized: "Other") }
@@ -281,7 +281,7 @@ private struct MonthGroupCard: View {
             VStack(alignment: .leading, spacing: 9) {
                 MediaThumbnailView(identifier: group.thumbnailAssetID, size: CGSize(width: 180, height: 100))
                     .frame(maxWidth: .infinity)
-                    .frame(height: 92)
+                    .aspectRatio(1.8, contentMode: .fit)
                     .clipShape(.rect(cornerRadius: 16))
                 HStack(alignment: .top, spacing: 8) {
                     VStack(alignment: .leading, spacing: 3) {
@@ -317,6 +317,7 @@ private struct MonthGroupCard: View {
             }
         }
         .buttonStyle(.plain)
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .top)
         .disabled(group.totalCount == 0)
         .accessibilityIdentifier("group-row-\(group.key.id)")
         .accessibilityValue(group.isCleaned ? (selected ? "Cleaned, selected to review again" : "Cleaned") : "\(group.unresolvedCount) left to review")
