@@ -56,8 +56,13 @@ final class RollSlashUITests: XCTestCase {
         XCTAssertTrue(app.buttons["open-media-viewer"].waitForExistence(timeout: 3))
         app.buttons["open-media-viewer"].tap()
         XCTAssertTrue(app.buttons["close-media-viewer"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["favorite-media"].waitForExistence(timeout: 3))
+        let favoriteButton = app.buttons["favorite-media"]
+        XCTAssertTrue(favoriteButton.waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["share-media"].waitForExistence(timeout: 3))
+        favoriteButton.tap()
+        XCTAssertTrue(app.buttons["Remove from Favorites"].waitForExistence(timeout: 3))
+        app.buttons["Remove from Favorites"].tap()
+        XCTAssertTrue(app.buttons["Add to Favorites"].waitForExistence(timeout: 3))
         app.buttons["close-media-viewer"].tap()
         XCTAssertTrue(app.buttons["decision-keep"].waitForExistence(timeout: 3))
     }

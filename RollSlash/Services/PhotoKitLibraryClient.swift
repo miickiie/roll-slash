@@ -75,11 +75,22 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
     }
 
     func setFavorite(_ favorite: Bool, for identifier: String) async throws {
-        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject else {
+        // PhotoKit runs the change block on its own serial queue. Keep the
+        // operation outside this @MainActor client so Swift 6 does not attach
+        // main-actor isolation to the closure (which would trap at runtime
+        // when PhotoKit invokes it off the main actor).
+        try await Self.performFavoriteChange(favorite, identifier: identifier)
+    }
+
+    nonisolated private static func performFavoriteChange(_ favorite: Bool, identifier: String) async throws {
+        let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil)
+        guard let asset = fetchResult.firstObject else {
             throw PhotoLibraryFavoriteError.assetUnavailable
         }
+
         try await PHPhotoLibrary.shared().performChanges {
-            PHAssetChangeRequest(for: asset).isFavorite = favorite
+            let request = PHAssetChangeRequest(for: asset)
+            request.isFavorite = favorite
         }
     }
 

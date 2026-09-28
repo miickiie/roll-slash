@@ -23,6 +23,7 @@ struct MediaViewer: View {
     @State private var zoomScale: CGFloat = 1
     @State private var isFavorite = false
     @State private var isUpdatingFavorite = false
+    @State private var favoriteTask: Task<Void, Never>?
     @State private var showingShareSheet = false
     @State private var favoriteErrorMessage: String?
 
@@ -94,7 +95,11 @@ struct MediaViewer: View {
             }
         }
         .task(id: asset.id) { await load() }
-        .onDisappear { player?.pause() }
+        .onDisappear {
+            favoriteTask?.cancel()
+            favoriteTask = nil
+            player?.pause()
+        }
         .sheet(isPresented: $showingShareSheet) {
             if let image {
                 ShareSheet(items: [image])
@@ -211,14 +216,18 @@ struct MediaViewer: View {
         guard !isUpdatingFavorite else { return }
         let nextValue = !isFavorite
         isUpdatingFavorite = true
-        Task {
+        favoriteTask?.cancel()
+        favoriteTask = Task { @MainActor in
+            defer { isUpdatingFavorite = false }
             do {
                 try await appModel.setFavorite(nextValue, for: asset.id)
+                guard !Task.isCancelled else { return }
                 isFavorite = nextValue
+            } catch is CancellationError {
+                return
             } catch {
                 favoriteErrorMessage = error.localizedDescription
             }
-            isUpdatingFavorite = false
         }
     }
 
