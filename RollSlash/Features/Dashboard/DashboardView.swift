@@ -169,10 +169,10 @@ private struct ResumeBanner: View {
                 Text("Changes from this unfinished session will be discarded and prior review choices restored. Your Photos library will not change.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                HStack {
-                    Spacer()
+                PopupActionRow {
                     Button("Keep Session") { showingDiscardConfirmation = false }
                         .buttonStyle(.bordered)
+                } confirm: {
                     Button("Discard Session", role: .destructive) {
                         showingDiscardConfirmation = false
                         appModel.discardActiveSession()
@@ -181,7 +181,6 @@ private struct ResumeBanner: View {
                     .tint(RollSlashTheme.coral)
                 }
             }
-            .padding()
     }
 }
 
@@ -329,10 +328,10 @@ private struct MonthGroupCard: View {
                     Text("All \(group.totalCount) accessible items in this group will be added to a new swipe session. Nothing is deleted until final review.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                    HStack {
-                        Spacer()
+                    PopupActionRow {
                         Button("Not Now") { showingReviewAgainConfirmation = false }
                             .buttonStyle(.bordered)
+                    } confirm: {
                         Button("Review Again") {
                             showingReviewAgainConfirmation = false
                             appModel.toggleSelection(group)
@@ -340,7 +339,6 @@ private struct MonthGroupCard: View {
                         .buttonStyle(.borderedProminent)
                     }
                 }
-                .padding()
             }
         }
     }
@@ -402,10 +400,10 @@ private struct GroupRow: View {
                     Text("All \(group.totalCount) accessible items in this group will be added to a new swipe session. Nothing is deleted until final review.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                    HStack {
-                        Spacer()
+                    PopupActionRow {
                         Button("Cancel") { showingReviewAgainConfirmation = false }
                             .buttonStyle(.bordered)
+                    } confirm: {
                         Button("Review Again") {
                             showingReviewAgainConfirmation = false
                             appModel.toggleSelection(group)
@@ -413,7 +411,6 @@ private struct GroupRow: View {
                         .buttonStyle(.borderedProminent)
                     }
                 }
-                .padding()
             }
         }
     }

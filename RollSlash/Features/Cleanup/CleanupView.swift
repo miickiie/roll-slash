@@ -71,10 +71,10 @@ struct CleanupView: View {
                         Text("This reviews the \(appModel.deleteCount) item\(appModel.deleteCount == 1 ? "" : "s") currently marked for deletion. Unswiped items stay in this session for later.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
-                        HStack {
-                            Spacer()
+                        PopupActionRow {
                             Button("Keep Swiping") { showingReviewNowConfirmation = false }
                                 .buttonStyle(.bordered)
+                        } confirm: {
                             Button("Review Deletes") {
                                 pendingReviewCurrentBatch = true
                                 showingReviewNowConfirmation = false
@@ -83,7 +83,6 @@ struct CleanupView: View {
                             .tint(RollSlashTheme.coral)
                         }
                     }
-                    .padding()
                 }
             }
         }

@@ -46,7 +46,6 @@ struct SettingsView: View {
                             .buttonStyle(.borderedProminent)
                         }
                     }
-                    .padding()
                 } else {
                     VStack(alignment: .leading, spacing: 14) {
                         Text("Reset cleanup history?")
@@ -54,10 +53,10 @@ struct SettingsView: View {
                         Text("Your Photos library will not change.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
-                        HStack {
-                            Spacer()
+                        PopupActionRow {
                             Button("Keep History") { confirmingReset = false }
                                 .buttonStyle(.bordered)
+                        } confirm: {
                             Button("Reset History", role: .destructive) {
                                 if appModel.resetHistory() {
                                     showingResetSuccess = true
@@ -69,7 +68,6 @@ struct SettingsView: View {
                             .tint(RollSlashTheme.coral)
                         }
                     }
-                    .padding()
                 }
             }
         }

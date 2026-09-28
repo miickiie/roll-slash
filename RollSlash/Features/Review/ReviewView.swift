@@ -11,6 +11,11 @@ struct ReviewView: View {
         return appModel.reviewCandidateIDs.compactMap { assetsByID[$0] }
     }
 
+    private var allCandidatesSelected: Bool {
+        let candidates = Set(appModel.reviewCandidateIDs)
+        return !candidates.isEmpty && candidates.isSubset(of: appModel.reviewSelectedIDs)
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -18,10 +23,13 @@ struct ReviewView: View {
                     Text("\(appModel.reviewSelectedIDs.count) selected for deletion")
                         .font(.subheadline.bold())
                     Spacer()
-                    Menu("Selection", systemImage: "checkmark.circle") {
-                        Button("Select All") { appModel.selectAllForDeletion() }
-                        Button("Keep All") { appModel.keepAllFromReview() }
+                    Button("Select All", systemImage: "checkmark.circle") {
+                        appModel.selectAllForDeletion()
                     }
+                    .buttonStyle(.bordered)
+                    .disabled(allCandidatesSelected || appModel.reviewCandidateIDs.isEmpty)
+                    .accessibilityIdentifier("select-all")
+                    .accessibilityHint("Select every item currently marked for deletion.")
                 }
                 .padding()
 
