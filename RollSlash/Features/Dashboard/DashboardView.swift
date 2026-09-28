@@ -169,19 +169,21 @@ private struct CatHeadAndPaw: View {
     var body: some View {
         ZStack {
             Path { path in
-                path.move(to: CGPoint(x: 7, y: 9))
-                path.addLine(to: CGPoint(x: 9, y: 1))
-                path.addLine(to: CGPoint(x: 14, y: 6))
+                path.move(to: CGPoint(x: 7, y: 10))
+                path.addLine(to: CGPoint(x: 9, y: 3))
+                path.addLine(to: CGPoint(x: 14, y: 8))
                 path.closeSubpath()
             }
             .fill(.yellow)
+            .offset(x: -3, y: isBobbing ? -1 : 1)
             Path { path in
-                path.move(to: CGPoint(x: 17, y: 6))
-                path.addLine(to: CGPoint(x: 23, y: 1))
-                path.addLine(to: CGPoint(x: 24, y: 10))
+                path.move(to: CGPoint(x: 17, y: 8))
+                path.addLine(to: CGPoint(x: 22, y: 3))
+                path.addLine(to: CGPoint(x: 24, y: 11))
                 path.closeSubpath()
             }
             .fill(.yellow)
+            .offset(x: -3, y: isBobbing ? -1 : 1)
             Capsule()
                 .fill(.yellow)
                 .frame(width: 18, height: 15)
