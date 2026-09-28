@@ -70,7 +70,7 @@
 		77C7FC77EAF5BB5F1517AE5C /* ReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewView.swift; sourceTree = "<group>"; };
 		7851BA9C180BFEC5B2A95853 /* MediaViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaViewer.swift; sourceTree = "<group>"; };
 		7CBDCD26AE26C7C7E9D0608C /* PhotoLibraryClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibraryClient.swift; sourceTree = "<group>"; };
-		9EA6D495B8F63F8D1088D2BA /* RollSlash.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = RollSlash.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9EA6D495B8F63F8D1088D2BA /* RollSlash.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RollSlash.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2281AF28C956852C90A6A87 /* CleanupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CleanupView.swift; sourceTree = "<group>"; };
 		A5FD18CD36FC70E70F19563D /* LocationResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationResolver.swift; sourceTree = "<group>"; };
 		A88D0E1977A1F97A389C3B59 /* MediaThumbnailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaThumbnailView.swift; sourceTree = "<group>"; };
@@ -81,7 +81,7 @@
 		DF4369D2DD5CF0F2324B83C7 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		E1F6E63FFA0BB55D80C46836 /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
 		E372FCEAD6AD3A927F4A0FD1 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
-		E4C0BCEF5532E9603C3515CC /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		E4C0BCEF5532E9603C3515CC /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		E5FDB8B9F87E2F267E1394A2 /* RollSlashApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RollSlashApp.swift; sourceTree = "<group>"; };
 		EF21AAB6D6465588408883A2 /* Records.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Records.swift; sourceTree = "<group>"; };
 		EFF3C3F2F40690CD27C1717B /* MediaPreviewProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPreviewProvider.swift; sourceTree = "<group>"; };
@@ -550,6 +550,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = GJ4KG52T53;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RollSlash/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -648,6 +649,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = GJ4KG52T53;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RollSlash/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
