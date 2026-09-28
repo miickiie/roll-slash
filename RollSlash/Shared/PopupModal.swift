@@ -17,10 +17,10 @@ struct PopupModal<Content: View>: View {
                 .padding(24)
                 .frame(maxWidth: 380)
                 .background(Color(uiColor: .secondarySystemBackground), in: .rect(cornerRadius: 28))
-                .foregroundStyle(.primary)
+                .foregroundStyle(Color.primary)
                 .overlay {
                     RoundedRectangle(cornerRadius: 28)
-                        .stroke(.primary.opacity(0.12), lineWidth: 1)
+                        .stroke(Color.primary.opacity(0.12), lineWidth: 1)
                 }
                 .shadow(color: .black.opacity(0.28), radius: 24, y: 12)
                 .padding(24)
@@ -46,14 +46,17 @@ struct PopupActionRow<Cancel: View, Confirm: View>: View {
     var body: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
-                cancel
-                confirm
+                cancel.fixedSize(horizontal: true, vertical: false)
+                confirm.fixedSize(horizontal: true, vertical: false)
             }
+            .frame(maxWidth: .infinity, alignment: .center)
 
             VStack(spacing: 10) {
-                cancel.frame(maxWidth: .infinity)
-                confirm.frame(maxWidth: .infinity)
+                cancel.fixedSize(horizontal: true, vertical: false)
+                confirm.fixedSize(horizontal: true, vertical: false)
             }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
+        .frame(maxWidth: .infinity)
     }
 }
