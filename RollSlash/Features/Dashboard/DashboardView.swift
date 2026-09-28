@@ -141,20 +141,12 @@ private struct RollSlashMascot: View {
                 .symbolRenderingMode(.palette)
                 .foregroundStyle(.white.opacity(0.9), .white.opacity(0.35))
                 .offset(x: 4, y: 4)
-            Image(systemName: "cat.fill")
-                .font(.system(size: 21, weight: .bold))
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(.yellow, .orange)
-                .offset(x: -3, y: isBobbing ? -1 : 1)
-            Image(systemName: "scissors")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(.white)
-                .rotationEffect(.degrees(isSlashing ? -38 : -8))
-                .offset(x: isSlashing ? 7 : 3, y: isSlashing ? -3 : 4)
+            CatHeadAndPaw(isBobbing: isBobbing, isSlashing: isSlashing)
+            Duster(isSlashing: isSlashing)
         }
         .frame(width: 36, height: 36)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Roll Slash mascot")
+        .accessibilityLabel("Roll Slash mascot, cat dusting the photo stack")
         .onAppear {
             guard !reduceMotion else { return }
             withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
@@ -167,6 +159,71 @@ private struct RollSlashMascot: View {
                 isSlashing.toggle()
             }
         }
+    }
+}
+
+private struct CatHeadAndPaw: View {
+    let isBobbing: Bool
+    let isSlashing: Bool
+
+    var body: some View {
+        ZStack {
+            Path { path in
+                path.move(to: CGPoint(x: 7, y: 9))
+                path.addLine(to: CGPoint(x: 9, y: 1))
+                path.addLine(to: CGPoint(x: 14, y: 6))
+                path.closeSubpath()
+            }
+            .fill(.yellow)
+            Path { path in
+                path.move(to: CGPoint(x: 17, y: 6))
+                path.addLine(to: CGPoint(x: 23, y: 1))
+                path.addLine(to: CGPoint(x: 24, y: 10))
+                path.closeSubpath()
+            }
+            .fill(.yellow)
+            Capsule()
+                .fill(.yellow)
+                .frame(width: 18, height: 15)
+                .overlay {
+                    HStack(spacing: 5) {
+                        Circle().fill(.black).frame(width: 2, height: 2)
+                        Circle().fill(.black).frame(width: 2, height: 2)
+                    }
+                    .offset(y: -1)
+                }
+                .overlay(alignment: .bottom) {
+                    Capsule()
+                        .fill(.pink.opacity(0.9))
+                        .frame(width: 4, height: 2)
+                        .offset(y: -3)
+                }
+                .offset(x: -5, y: isBobbing ? -3 : -1)
+            Image(systemName: "pawprint.fill")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.orange)
+                .rotationEffect(.degrees(isSlashing ? -35 : -12))
+                .offset(x: 5, y: isSlashing ? 4 : 7)
+        }
+    }
+}
+
+private struct Duster: View {
+    let isSlashing: Bool
+
+    var body: some View {
+        VStack(spacing: -3) {
+            HStack(spacing: -3) {
+                Capsule().fill(.mint).frame(width: 5, height: 10).rotationEffect(.degrees(-20))
+                Capsule().fill(.mint).frame(width: 5, height: 12)
+                Capsule().fill(.mint).frame(width: 5, height: 10).rotationEffect(.degrees(20))
+            }
+            Capsule()
+                .fill(.white.opacity(0.9))
+                .frame(width: 3, height: 10)
+        }
+        .rotationEffect(.degrees(isSlashing ? -48 : -18))
+        .offset(x: isSlashing ? 8 : 5, y: isSlashing ? -3 : 4)
     }
 }
 
