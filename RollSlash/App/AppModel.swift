@@ -2,6 +2,16 @@ import Foundation
 import Observation
 import SwiftData
 
+private struct GroupCompletionSnapshot: Sendable {
+    let groupKey: String
+    let lastLabel: String
+}
+
+private struct GroupBuildResult: Sendable {
+    let month: [MediaGroup]
+    let location: [MediaGroup]
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -17,6 +27,8 @@ final class AppModel {
     var locationGroups: [MediaGroup] = []
     var selectedGroupIDs: Set<String> = []
     var assets: [PhotoAssetDescriptor] = []
+    private(set) var assetIndex: [String: PhotoAssetDescriptor] = [:]
+    private(set) var decisionsByAssetID: [String: AssetDecision] = [:]
     var activeSession: CleanupSessionRecord?
     var actions: [CleanupActionRecord] = []
     var isLoading = false
@@ -53,12 +65,11 @@ final class AppModel {
     }
 
     var selectedCandidateCount: Int {
-        let decisions = (try? repository.allDecisions()) ?? [:]
         return selectedGroups.reduce(into: Set<String>()) { identifiers, group in
             if group.isCleaned {
                 identifiers.formUnion(group.assetIDs)
             } else {
-                identifiers.formUnion(group.assetIDs.filter { decisions[$0] == nil })
+                identifiers.formUnion(group.assetIDs.filter { decisionsByAssetID[$0] == nil })
             }
         }.count
     }
@@ -71,7 +82,11 @@ final class AppModel {
         guard let session = activeSession,
               session.cursor < session.orderedAssetIDs.count else { return nil }
         let identifier = session.orderedAssetIDs[session.cursor]
-        return assets.first { $0.id == identifier }
+        return assetIndex[identifier]
+    }
+
+    var reviewCandidateAssets: [PhotoAssetDescriptor] {
+        reviewCandidateIDs.compactMap { assetIndex[$0] }
     }
 
     var sessionTotal: Int { activeSession?.orderedAssetIDs.count ?? 0 }
@@ -135,6 +150,7 @@ final class AppModel {
             locationResolutionTask?.cancel()
             previewProvider.stopCachingAll()
             assets = []
+            assetIndex = [:]
             monthGroups = []
             locationGroups = []
             selectedGroupIDs.removeAll()
@@ -153,11 +169,15 @@ final class AppModel {
         isLoading = true
         defer { isLoading = false }
         do {
-            assets = try await photoLibrary.fetchAssets()
+            let fetchedAssets = try await photoLibrary.fetchAssets()
+            assets = fetchedAssets
+            assetIndex = Dictionary(uniqueKeysWithValues: fetchedAssets.map { ($0.id, $0) })
+            try refreshDecisionCache()
             try recoverDeletingSessionIfPossible()
             try reconcileSessionState(purgeMissingDecisions: permission == .full)
+            try refreshDecisionCache()
             try loadCachedLocations()
-            try rebuildGroups()
+            try await rebuildGroupsOffMain()
             if grouping == .location { resolveMissingLocations() }
             if let session = activeSession,
                session.status == .swiping,
@@ -182,12 +202,11 @@ final class AppModel {
             resumeSession()
             return
         }
-        let decisions = (try? repository.allDecisions()) ?? [:]
         let identifiers = selectedGroups.reduce(into: Set<String>()) { identifiers, group in
             if group.isCleaned {
                 identifiers.formUnion(group.assetIDs)
             } else {
-                identifiers.formUnion(group.assetIDs.filter { decisions[$0] == nil })
+                identifiers.formUnion(group.assetIDs.filter { decisionsByAssetID[$0] == nil })
             }
         }
         let ordered = assets
@@ -230,6 +249,7 @@ final class AppModel {
         guard let session = activeSession else { return }
         do {
             try repository.discard(session: session)
+            try refreshDecisionCache()
             activeSession = nil
             actions = []
             selectedGroupIDs.removeAll()
@@ -254,6 +274,7 @@ final class AppModel {
                 decision: decision
             )
             try repository.setDecision(decision, for: assetIdentifier, sessionIdentifier: session.identifier)
+            decisionsByAssetID[assetIdentifier] = decision
             session.cursor += 1
             try repository.save()
             actions = try repository.actions(for: session.identifier)
@@ -274,6 +295,7 @@ final class AppModel {
         do {
             action.isApplied = false
             try repository.restoreOriginalDecision(for: action.assetIdentifier, in: session)
+            try refreshDecisionCache()
             session.cursor -= 1
             try repository.save()
             actions = try repository.actions(for: session.identifier)
@@ -289,6 +311,7 @@ final class AppModel {
         do {
             action.isApplied = true
             try repository.setDecision(action.decision, for: action.assetIdentifier, sessionIdentifier: session.identifier)
+            decisionsByAssetID[action.assetIdentifier] = action.decision
             session.cursor += 1
             try repository.save()
             actions = try repository.actions(for: session.identifier)
@@ -321,7 +344,9 @@ final class AppModel {
     }
 
     func toggleReviewSelection(_ identifier: String) {
-        guard let session = activeSession else { return }
+        guard let session = activeSession,
+              reviewCandidateIDs.contains(identifier),
+              assetIndex[identifier] != nil else { return }
         let isSelected = !session.reviewSelectedIDs.contains(identifier)
         do {
             try repository.updateReviewSelection(
@@ -329,6 +354,7 @@ final class AppModel {
                 assetIdentifier: identifier,
                 isSelected: isSelected
             )
+            decisionsByAssetID[identifier] = isSelected ? .deletePending : .keep
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -342,6 +368,7 @@ final class AppModel {
                 candidateIDs: reviewCandidateIDs,
                 selectedIDs: Set(reviewCandidateIDs)
             )
+            try refreshDecisionCache()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -351,6 +378,7 @@ final class AppModel {
         guard let session = activeSession else { return }
         do {
             try repository.updateReviewSelection(session: session, candidateIDs: reviewCandidateIDs, selectedIDs: [])
+            try refreshDecisionCache()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -392,7 +420,13 @@ final class AppModel {
 
         if !selected.isEmpty {
             do {
-                try await photoLibrary.deleteAssets(with: selected)
+                let deletedIdentifiers = try await photoLibrary.deleteAssets(with: selected)
+                guard deletedIdentifiers == Set(selected) else {
+                    throw PhotoLibraryDeletionError.inaccessibleAssets(
+                        requested: Set(selected).count,
+                        accessible: deletedIdentifiers.count
+                    )
+                }
             } catch {
                 guard activeSession?.identifier == sessionID else { return }
                 session.status = .reviewing
@@ -409,7 +443,10 @@ final class AppModel {
 
         do {
             guard activeSession?.identifier == sessionID else { return }
-            if !selected.isEmpty { try repository.removeDecisions(for: Set(selected)) }
+            if !selected.isEmpty {
+                try repository.removeDecisions(for: Set(selected))
+                try refreshDecisionCache()
+            }
             try finalizeSession(session, markGroupsCompleted: fullyReviewed)
             await reloadLibrary()
             route = fullyReviewed ? .completion : .dashboard
@@ -421,6 +458,7 @@ final class AppModel {
             } else {
                 let deleted = Set(selected)
                 assets.removeAll { deleted.contains($0.id) }
+                assetIndex = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
                 selectedGroupIDs.removeAll()
                 try? rebuildGroups()
                 route = .dashboard
@@ -450,6 +488,7 @@ final class AppModel {
         }
         do {
             try repository.resetHistory()
+            try refreshDecisionCache()
             activeSession = nil
             actions = []
             selectedGroupIDs.removeAll()
@@ -494,16 +533,67 @@ final class AppModel {
         }
     }
 
-    private func rebuildGroups() throws {
-        let decisions = try repository.allDecisions()
-        let completionRecords = try repository.completedGroups()
-        monthGroups = buildMonthGroups(decisions: decisions, completions: completionRecords)
-        locationGroups = buildLocationGroups(decisions: decisions, completions: completionRecords)
+    private func refreshDecisionCache() throws {
+        decisionsByAssetID = try repository.allDecisions()
     }
 
-    private func buildMonthGroups(
+    private func rebuildGroups() throws {
+        let completions = try completionSnapshots()
+        let result = Self.buildGroups(
+            assets: assets,
+            decisions: decisionsByAssetID,
+            completions: completions,
+            bucketLocations: bucketLocations
+        )
+        monthGroups = result.month
+        locationGroups = result.location
+    }
+
+    private func rebuildGroupsOffMain() async throws {
+        let completions = try completionSnapshots()
+        let assets = assets
+        let decisions = decisionsByAssetID
+        let bucketLocations = bucketLocations
+        let result = await Task.detached(priority: .userInitiated) {
+            Self.buildGroups(
+                assets: assets,
+                decisions: decisions,
+                completions: completions,
+                bucketLocations: bucketLocations
+            )
+        }.value
+        guard !Task.isCancelled else { return }
+        monthGroups = result.month
+        locationGroups = result.location
+    }
+
+    private func completionSnapshots() throws -> [String: GroupCompletionSnapshot] {
+        try repository.completedGroups().reduce(into: [:]) { result, record in
+            result[record.groupKey] = GroupCompletionSnapshot(groupKey: record.groupKey, lastLabel: record.lastLabel)
+        }
+    }
+
+    private static func buildGroups(
+        assets: [PhotoAssetDescriptor],
         decisions: [String: AssetDecision],
-        completions: [String: GroupCompletionRecord]
+        completions: [String: GroupCompletionSnapshot],
+        bucketLocations: [String: ResolvedLocation]
+    ) -> GroupBuildResult {
+        GroupBuildResult(
+            month: buildMonthGroups(assets: assets, decisions: decisions, completions: completions),
+            location: buildLocationGroups(
+                assets: assets,
+                decisions: decisions,
+                completions: completions,
+                bucketLocations: bucketLocations
+            )
+        )
+    }
+
+    private static func buildMonthGroups(
+        assets: [PhotoAssetDescriptor],
+        decisions: [String: AssetDecision],
+        completions: [String: GroupCompletionSnapshot]
     ) -> [MediaGroup] {
         let grouped = MonthGrouping.group(assets)
         var groups = grouped.map { key, values in
@@ -541,9 +631,11 @@ final class AppModel {
         }
     }
 
-    private func buildLocationGroups(
+    private static func buildLocationGroups(
+        assets: [PhotoAssetDescriptor],
         decisions: [String: AssetDecision],
-        completions: [String: GroupCompletionRecord]
+        completions: [String: GroupCompletionSnapshot],
+        bucketLocations: [String: ResolvedLocation]
     ) -> [MediaGroup] {
         var grouped: [String: (ResolvedLocation?, [PhotoAssetDescriptor])] = [:]
         for asset in assets {
@@ -618,14 +710,14 @@ final class AppModel {
 
     private func loadCachedLocations() throws {
         let buckets = Set(assets.compactMap(\.coordinate).map(LocationBucketing.key))
-        for bucket in buckets {
+        for bucket in buckets.subtracting(bucketLocations.keys) {
             if let location = try repository.cachedLocation(for: bucket) {
                 bucketLocations[bucket] = location
             }
         }
     }
 
-    private func itemCountText(_ count: Int) -> String {
+    private static func itemCountText(_ count: Int) -> String {
         count == 1 ? String(localized: "1 item") : String(localized: "\(count) items")
     }
 
@@ -654,7 +746,7 @@ final class AppModel {
                         // Leave transient failures uncached so a later refresh can retry them.
                     }
                 }
-                if changed { try? rebuildGroups() }
+                if changed { try? await rebuildGroupsOffMain() }
                 await Task.yield()
             }
         }

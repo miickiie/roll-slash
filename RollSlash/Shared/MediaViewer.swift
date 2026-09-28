@@ -161,6 +161,9 @@ struct MediaViewer: View {
     }
 
     private func handleNavigationSwipe(_ value: DragGesture.Value) {
+        // VideoPlayer owns horizontal drags for scrubbing. Use the explicit
+        // Previous/Next controls for video review navigation instead.
+        guard asset.mediaKind != .video else { return }
         guard zoomScale <= 1.001 else { return }
         guard abs(value.translation.width) > abs(value.translation.height) else { return }
         guard abs(value.translation.width) >= 80 else { return }

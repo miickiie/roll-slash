@@ -27,10 +27,11 @@ final class DemoPhotoLibraryClient: PhotoLibraryClient {
     func requestAuthorization() async -> PhotoPermission { .full }
     func fetchAssets() async throws -> [PhotoAssetDescriptor] { assets }
 
-    func deleteAssets(with identifiers: [String]) async throws {
+    func deleteAssets(with identifiers: [String]) async throws -> Set<String> {
         let deleted = Set(identifiers)
         assets.removeAll { deleted.contains($0.id) }
         onLibraryChange?()
+        return deleted
     }
 
     func presentLimitedLibraryPicker() {}

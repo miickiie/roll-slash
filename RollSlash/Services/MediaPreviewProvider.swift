@@ -80,6 +80,10 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
     }
 
     func startCaching(identifiers: [String], targetSize: CGSize) {
+        // Keep the preheat window bounded. PhotoKit may evict under pressure,
+        // but relying on that would let a long cleanup session retain every
+        // previously preheated card.
+        manager.stopCachingImagesForAllAssets()
         let result = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
         var assets: [PHAsset] = []
         result.enumerateObjects { asset, _, _ in assets.append(asset) }

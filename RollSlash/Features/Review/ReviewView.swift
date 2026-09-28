@@ -6,11 +6,6 @@ struct ReviewView: View {
 
     private let columns = Array(repeating: GridItem(.flexible(minimum: 72, maximum: 110), spacing: 4), count: 4)
 
-    private var reviewPreviewAssets: [PhotoAssetDescriptor] {
-        let assetsByID = Dictionary(uniqueKeysWithValues: appModel.assets.map { ($0.id, $0) })
-        return appModel.reviewCandidateIDs.compactMap { assetsByID[$0] }
-    }
-
     private var allCandidatesSelected: Bool {
         let candidates = Set(appModel.reviewCandidateIDs)
         return !candidates.isEmpty && candidates.isSubset(of: appModel.reviewSelectedIDs)
@@ -107,14 +102,7 @@ struct ReviewView: View {
     get: { focusedIdentifier.map(PreviewIdentifier.init) },
     set: { focusedIdentifier = $0?.id }
 )) { item in
-    if reviewPreviewAssets.contains(where: { $0.id == item.id }) {
-        ReviewMediaViewer(
-            assets: reviewPreviewAssets,
-            initialIdentifier: item.id
-        )
-    } else {
-        ContentUnavailableView("Item unavailable", systemImage: "photo.badge.exclamationmark")
-    }
+    ReviewMediaViewer(initialIdentifier: item.id)
 }
             .alert("Deletion did not complete", isPresented: Binding(
                 get: { appModel.errorMessage != nil },
@@ -134,17 +122,26 @@ private struct PreviewIdentifier: Identifiable {
 
 private struct ReviewMediaViewer: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.dismiss) private var dismiss
 
-    let assets: [PhotoAssetDescriptor]
-    @State private var currentIndex: Int
+    let initialIdentifier: String
+    @State private var currentIdentifier: String
 
-    init(assets: [PhotoAssetDescriptor], initialIdentifier: String) {
-        self.assets = assets
-        _currentIndex = State(initialValue: assets.firstIndex(where: { $0.id == initialIdentifier }) ?? 0)
+    init(initialIdentifier: String) {
+        self.initialIdentifier = initialIdentifier
+        _currentIdentifier = State(initialValue: initialIdentifier)
+    }
+
+    private var assets: [PhotoAssetDescriptor] {
+        appModel.reviewCandidateAssets
+    }
+
+    private var currentIndex: Int? {
+        assets.firstIndex { $0.id == currentIdentifier }
     }
 
     private var currentAsset: PhotoAssetDescriptor? {
-        guard assets.indices.contains(currentIndex) else { return nil }
+        guard let currentIndex, assets.indices.contains(currentIndex) else { return nil }
         return assets[currentIndex]
     }
 
@@ -155,26 +152,34 @@ private struct ReviewMediaViewer: View {
 
     var body: some View {
         Group {
-            if let currentAsset {
+            if let currentAsset, let currentIndex {
                 MediaViewer(
                     asset: currentAsset,
                     onSwipeLeft: advance,
                     onSwipeRight: goBack
                 )
                 .overlay(alignment: .bottom) {
-                    controls
+                    controls(currentIndex: currentIndex)
                 }
             } else {
-                ContentUnavailableView("Item unavailable", systemImage: "photo.badge.exclamationmark")
+                VStack(spacing: 16) {
+                    ContentUnavailableView("Item unavailable", systemImage: "photo.badge.exclamationmark")
+                    Button("Close") { dismiss() }
+                        .buttonStyle(.borderedProminent)
+                }
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(.black)
             }
         }
         .accessibilityIdentifier("review-media-viewer")
+        .onAppear { reconcileCurrentAsset() }
+        .onChange(of: appModel.reviewCandidateIDs) { _, _ in
+            reconcileCurrentAsset()
+        }
     }
 
-    private var controls: some View {
+    private func controls(currentIndex: Int) -> some View {
         VStack(spacing: 10) {
             Text("\(currentIndex + 1) of \(assets.count)")
                 .font(.subheadline.weight(.semibold))
@@ -224,17 +229,26 @@ private struct ReviewMediaViewer: View {
     }
 
     private func advance() {
-        guard currentIndex < assets.count - 1 else { return }
+        guard let currentIndex, currentIndex < assets.count - 1 else { return }
         withAnimation(.snappy) {
-            currentIndex += 1
+            self.currentIdentifier = assets[currentIndex + 1].id
         }
     }
 
     private func goBack() {
-        guard currentIndex > 0 else { return }
+        guard let currentIndex, currentIndex > 0 else { return }
         withAnimation(.snappy) {
-            currentIndex -= 1
+            self.currentIdentifier = assets[currentIndex - 1].id
         }
+    }
+
+    private func reconcileCurrentAsset() {
+        guard !assets.isEmpty else {
+            dismiss()
+            return
+        }
+        guard !assets.contains(where: { $0.id == currentIdentifier }) else { return }
+        currentIdentifier = assets.first?.id ?? initialIdentifier
     }
 }
 

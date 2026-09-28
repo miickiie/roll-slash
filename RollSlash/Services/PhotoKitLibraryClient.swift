@@ -66,16 +66,27 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
         }.value
     }
 
-    func deleteAssets(with identifiers: [String]) async throws {
+    func deleteAssets(with identifiers: [String]) async throws -> Set<String> {
         try await Self.performDeletion(identifiers)
     }
 
-    nonisolated private static func performDeletion(_ identifiers: [String]) async throws {
-        guard !identifiers.isEmpty else { return }
+    nonisolated private static func performDeletion(_ identifiers: [String]) async throws -> Set<String> {
+        guard !identifiers.isEmpty else { return [] }
         let assets = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
+        var accessibleIdentifiers = Set<String>()
+        assets.enumerateObjects { asset, _, _ in
+            accessibleIdentifiers.insert(asset.localIdentifier)
+        }
+        guard accessibleIdentifiers.count == Set(identifiers).count else {
+            throw PhotoLibraryDeletionError.inaccessibleAssets(
+                requested: Set(identifiers).count,
+                accessible: accessibleIdentifiers.count
+            )
+        }
         try await PHPhotoLibrary.shared().performChanges {
             PHAssetChangeRequest.deleteAssets(assets)
         }
+        return accessibleIdentifiers
     }
 
     func presentLimitedLibraryPicker() {

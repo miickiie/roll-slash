@@ -302,6 +302,26 @@ struct AppModelTests {
         #expect(harness.model.sessionTotal == 1)
     }
 
+    @Test("deletion keeps review state when Photos access hides a selected item")
+    func deletionAccessMismatchKeepsReview() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+        harness.model.decide(.deletePending)
+        harness.model.reviewCurrentBatch()
+        harness.client.deletionResultOverride = []
+
+        await harness.model.commitDeletion()
+
+        #expect(harness.model.activeSession?.status == .reviewing)
+        #expect(harness.model.route == .review)
+        #expect(harness.client.assets.contains { $0.id == "jan-new" })
+        #expect(harness.model.reviewSelectedIDs == Set(["jan-new"]))
+    }
+
     private func makeHarness(failDeletion: Bool = false) throws -> Harness {
         let calendar = Calendar(identifier: .gregorian)
         let assets = [
@@ -351,6 +371,7 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
     var assets: [PhotoAssetDescriptor]
     var shouldFailDeletion: Bool
     var deletedIdentifiers: [String] = []
+    var deletionResultOverride: Set<String>?
     var permission: PhotoPermission = .full
 
     init(assets: [PhotoAssetDescriptor], shouldFailDeletion: Bool) {
@@ -361,11 +382,13 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
     func authorizationStatus() -> PhotoPermission { permission }
     func requestAuthorization() async -> PhotoPermission { permission }
     func fetchAssets() async throws -> [PhotoAssetDescriptor] { assets }
-    func deleteAssets(with identifiers: [String]) async throws {
+    func deleteAssets(with identifiers: [String]) async throws -> Set<String> {
         if shouldFailDeletion { throw TestError.deletionFailed }
         deletedIdentifiers = identifiers
         let deleted = Set(identifiers)
-        assets.removeAll { deleted.contains($0.id) }
+        let result = deletionResultOverride ?? deleted
+        assets.removeAll { result.contains($0.id) }
+        return result
     }
     func presentLimitedLibraryPicker() {}
     func openSystemSettings() {}
