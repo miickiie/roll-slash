@@ -13,6 +13,17 @@ enum PhotoLibraryDeletionError: LocalizedError, Sendable {
     }
 }
 
+enum PhotoLibraryFavoriteError: LocalizedError, Sendable {
+    case assetUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .assetUnavailable:
+            String(localized: "This item is no longer available in Photos.")
+        }
+    }
+}
+
 @MainActor
 protocol PhotoLibraryClient: AnyObject {
     var onLibraryChange: (@MainActor @Sendable () -> Void)? { get set }
@@ -20,6 +31,8 @@ protocol PhotoLibraryClient: AnyObject {
     func requestAuthorization() async -> PhotoPermission
     func fetchAssets() async throws -> [PhotoAssetDescriptor]
     func deleteAssets(with identifiers: [String]) async throws -> Set<String>
+    func isFavorite(with identifier: String) async -> Bool
+    func setFavorite(_ favorite: Bool, for identifier: String) async throws
     func presentLimitedLibraryPicker()
     func openSystemSettings()
 }

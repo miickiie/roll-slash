@@ -21,6 +21,10 @@ struct MediaViewer: View {
     @State private var isMuted = true
     @State private var failed = false
     @State private var zoomScale: CGFloat = 1
+    @State private var isFavorite = false
+    @State private var isUpdatingFavorite = false
+    @State private var showingShareSheet = false
+    @State private var favoriteErrorMessage: String?
 
     var body: some View {
         ZStack {
@@ -35,6 +39,34 @@ struct MediaViewer: View {
                         .font(.headline)
                         .foregroundStyle(.white)
                     Spacer()
+                    if image != nil {
+                        Button(
+                            isFavorite ? "Remove from Favorites" : "Add to Favorites",
+                            systemImage: isFavorite ? "heart.fill" : "heart"
+                        ) {
+                            toggleFavorite()
+                        }
+                        .labelStyle(.iconOnly)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(isFavorite ? RollSlashTheme.coral : .white)
+                        .padding(12)
+                        .background(.black.opacity(0.55), in: .circle)
+                        .disabled(isUpdatingFavorite)
+                        .accessibilityIdentifier("favorite-media")
+                        .accessibilityLabel(isFavorite ? "Remove from Favorites" : "Add to Favorites")
+                    }
+                    if image != nil {
+                        Button("Share", systemImage: "square.and.arrow.up") {
+                            showingShareSheet = true
+                        }
+                        .labelStyle(.iconOnly)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(12)
+                        .background(.black.opacity(0.55), in: .circle)
+                        .accessibilityIdentifier("share-media")
+                        .accessibilityLabel("Share photo")
+                    }
                     if asset.mediaKind == .video {
                         Button(isMuted ? "Unmute" : "Mute", systemImage: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") {
                             isMuted.toggle()
@@ -63,6 +95,19 @@ struct MediaViewer: View {
         }
         .task(id: asset.id) { await load() }
         .onDisappear { player?.pause() }
+        .sheet(isPresented: $showingShareSheet) {
+            if let image {
+                ShareSheet(items: [image])
+            }
+        }
+        .alert("Favorite could not be updated", isPresented: Binding(
+            get: { favoriteErrorMessage != nil },
+            set: { if !$0 { favoriteErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { favoriteErrorMessage = nil }
+        } message: {
+            Text(favoriteErrorMessage ?? "")
+        }
         .simultaneousGesture(
             DragGesture(minimumDistance: 24)
                 .onEnded { value in
@@ -139,9 +184,11 @@ struct MediaViewer: View {
         isLivePlaying = false
         zoomScale = 1
         failed = false
+        favoriteErrorMessage = nil
         let target = CGSize(width: 1600, height: 2200)
         image = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active)
         guard !Task.isCancelled else { return }
+        isFavorite = await appModel.isFavorite(asset.id)
 
         switch asset.mediaKind {
         case .photo:
@@ -160,6 +207,21 @@ struct MediaViewer: View {
         failed = image == nil && livePhoto == nil && player == nil
     }
 
+    private func toggleFavorite() {
+        guard !isUpdatingFavorite else { return }
+        let nextValue = !isFavorite
+        isUpdatingFavorite = true
+        Task {
+            do {
+                try await appModel.setFavorite(nextValue, for: asset.id)
+                isFavorite = nextValue
+            } catch {
+                favoriteErrorMessage = error.localizedDescription
+            }
+            isUpdatingFavorite = false
+        }
+    }
+
     private func handleNavigationSwipe(_ value: DragGesture.Value) {
         // VideoPlayer owns horizontal drags for scrubbing. Use the explicit
         // Previous/Next controls for video review navigation instead.
@@ -174,6 +236,16 @@ struct MediaViewer: View {
             onSwipeRight?()
         }
     }
+}
+
+private struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 private struct ZoomableImage: View {

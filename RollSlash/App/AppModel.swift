@@ -110,6 +110,14 @@ final class AppModel {
 
     var isPartialAccess: Bool { permission == .limited }
 
+    func isFavorite(_ identifier: String) async -> Bool {
+        await photoLibrary.isFavorite(with: identifier)
+    }
+
+    func setFavorite(_ favorite: Bool, for identifier: String) async throws {
+        try await photoLibrary.setFavorite(favorite, for: identifier)
+    }
+
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true

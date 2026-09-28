@@ -70,6 +70,19 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
         try await Self.performDeletion(identifiers)
     }
 
+    func isFavorite(with identifier: String) async -> Bool {
+        PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject?.isFavorite ?? false
+    }
+
+    func setFavorite(_ favorite: Bool, for identifier: String) async throws {
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject else {
+            throw PhotoLibraryFavoriteError.assetUnavailable
+        }
+        try await PHPhotoLibrary.shared().performChanges {
+            PHAssetChangeRequest(for: asset).isFavorite = favorite
+        }
+    }
+
     nonisolated private static func performDeletion(_ identifiers: [String]) async throws -> Set<String> {
         guard !identifiers.isEmpty else { return [] }
         let assets = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)

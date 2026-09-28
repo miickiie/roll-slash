@@ -6,6 +6,7 @@ import UIKit
 final class DemoPhotoLibraryClient: PhotoLibraryClient {
     var onLibraryChange: (@MainActor @Sendable () -> Void)?
     private var assets: [PhotoAssetDescriptor]
+    private var favoriteIdentifiers: Set<String> = []
 
     init() {
         let calendar = Calendar(identifier: .gregorian)
@@ -32,6 +33,21 @@ final class DemoPhotoLibraryClient: PhotoLibraryClient {
         assets.removeAll { deleted.contains($0.id) }
         onLibraryChange?()
         return deleted
+    }
+
+    func isFavorite(with identifier: String) async -> Bool {
+        favoriteIdentifiers.contains(identifier)
+    }
+
+    func setFavorite(_ favorite: Bool, for identifier: String) async throws {
+        guard assets.contains(where: { $0.id == identifier }) else {
+            throw PhotoLibraryFavoriteError.assetUnavailable
+        }
+        if favorite {
+            favoriteIdentifiers.insert(identifier)
+        } else {
+            favoriteIdentifiers.remove(identifier)
+        }
     }
 
     func presentLimitedLibraryPicker() {}

@@ -391,6 +391,8 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
         assets.removeAll { result.contains($0.id) }
         return result
     }
+    func isFavorite(with identifier: String) async -> Bool { false }
+    func setFavorite(_ favorite: Bool, for identifier: String) async throws {}
     func presentLimitedLibraryPicker() {}
     func openSystemSettings() {}
 }
