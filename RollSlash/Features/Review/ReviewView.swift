@@ -4,7 +4,7 @@ struct ReviewView: View {
     @Environment(AppModel.self) private var appModel
     @State private var focusedIdentifier: String?
 
-    private let columns = Array(repeating: GridItem(.flexible(minimum: 72, maximum: 110), spacing: 4), count: 4)
+    private let columns = Array(repeating: GridItem(.flexible(minimum: 0), spacing: 4), count: 4)
 
     private var allCandidatesSelected: Bool {
         let candidates = Set(appModel.reviewCandidateIDs)
@@ -253,6 +253,8 @@ private struct ReviewMediaViewer: View {
 }
 
 private struct ReviewTile: View {
+    private let tileHeight: CGFloat = 96
+
     let identifier: String
     let isSelected: Bool
     let toggle: () -> Void
@@ -261,13 +263,15 @@ private struct ReviewTile: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Button(action: preview) {
-                MediaThumbnailView(identifier: identifier, size: CGSize(width: 100, height: 100))
+                MediaThumbnailView(identifier: identifier, size: CGSize(width: 140, height: 96))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity)
+            .frame(height: tileHeight)
+            .clipShape(.rect(cornerRadius: 8))
             .accessibilityLabel("Preview photo")
             .accessibilityIdentifier("review-preview-\(identifier)")
             .accessibilityHint("Opens a full-screen preview. Swipe left for the next item or right for the previous item.")
@@ -288,6 +292,6 @@ private struct ReviewTile: View {
             .padding(4)
         }
         .frame(maxWidth: .infinity)
-        .aspectRatio(1, contentMode: .fit)
+        .frame(height: tileHeight)
     }
 }
