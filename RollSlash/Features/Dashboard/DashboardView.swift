@@ -136,17 +136,12 @@ private struct RollSlashMascot: View {
                         endPoint: .bottomTrailing
                     )
                 )
-            Image(systemName: "photo.stack.fill")
-                .font(.system(size: 18, weight: .bold))
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(.white.opacity(0.9), .white.opacity(0.35))
-                .offset(x: 4, y: 4)
             CatHeadAndPaw(isBobbing: isBobbing, isSlashing: isSlashing)
             Duster(isSlashing: isSlashing)
         }
         .frame(width: 36, height: 36)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Roll Slash mascot, cat dusting the photo stack")
+        .accessibilityLabel("Roll Slash mascot, cat with an animated paw and feather duster")
         .onAppear {
             guard !reduceMotion else { return }
             withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
