@@ -526,6 +526,11 @@ final class AppModel {
         try repository.finish(session: session)
         activeSession = nil
         actions = []
+        // A finished session must not leave its groups selected. Otherwise a
+        // later tap on the same group is interpreted as a deselection, making
+        // it impossible to continue an unfinished group after a partial
+        // review deletion.
+        selectedGroupIDs.removeAll()
         do {
             try rebuildGroups()
         } catch {
