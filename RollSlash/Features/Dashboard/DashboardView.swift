@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @Environment(AppModel.self) private var appModel
+    @State private var mascotActionID = 0
 
     var body: some View {
         @Bindable var appModel = appModel
@@ -10,7 +11,7 @@ struct DashboardView: View {
                 Color(.systemGroupedBackground).ignoresSafeArea()
                 content
             }
-            .navigationTitle("Roll Slash")
+            .navigationTitle("")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Settings", systemImage: "gearshape") {
@@ -29,15 +30,20 @@ struct DashboardView: View {
             } message: {
                 Text(appModel.errorMessage ?? "")
             }
+            .onChange(of: appModel.grouping) { _, _ in mascotDidMove() }
+            .onChange(of: appModel.selectedGroupIDs) { _, _ in mascotDidMove() }
+            .onChange(of: appModel.route) { _, _ in mascotDidMove() }
+            .onChange(of: appModel.showingSettings) { _, _ in mascotDidMove() }
         }
     }
 
     @ViewBuilder
     private var content: some View {
-        if !appModel.permission.canRead {
-            PermissionEmptyState()
-        } else {
-            VStack(spacing: 0) {
+        VStack(spacing: 0) {
+            DashboardHeader(actionID: mascotActionID)
+            if !appModel.permission.canRead {
+                PermissionEmptyState()
+            } else {
                 if appModel.isPartialAccess { LimitedAccessBanner() }
                 if appModel.activeSession != nil { ResumeBanner() }
                 Picker("Grouping", selection: Binding(
@@ -63,29 +69,102 @@ struct DashboardView: View {
                         description: Text("Accessible photos and videos will appear here.")
                     )
                 } else {
-                    GroupList()
+                    GroupList(onInteraction: mascotDidMove)
                 }
             }
-            .safeAreaInset(edge: .bottom) {
-                if !appModel.selectedGroupIDs.isEmpty {
-                    Button {
-                        appModel.beginSelectedCleanup()
-                    } label: {
-                        VStack(spacing: 2) {
-                            Text("Clean \(appModel.selectedGroupIDs.count) groups")
-                                .font(.headline)
-                            Text("\(appModel.selectedCandidateCount) items to review")
-                                .font(.caption)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 6)
+        }
+        .safeAreaInset(edge: .bottom) {
+            if !appModel.selectedGroupIDs.isEmpty {
+                Button {
+                    mascotDidMove()
+                    appModel.beginSelectedCleanup()
+                } label: {
+                    VStack(spacing: 2) {
+                        Text("Clean \(appModel.selectedGroupIDs.count) groups")
+                            .font(.headline)
+                        Text("\(appModel.selectedCandidateCount) items to review")
+                            .font(.caption)
                     }
-                    .buttonStyle(.glassProminent)
-                    .tint(RollSlashTheme.violet)
-                    .disabled(appModel.selectedUnresolvedCount == 0)
-                    .accessibilityIdentifier("clean-selected")
-                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
                 }
+                .buttonStyle(.glassProminent)
+                .tint(RollSlashTheme.violet)
+                .disabled(appModel.selectedUnresolvedCount == 0)
+                .accessibilityIdentifier("clean-selected")
+                .padding()
+            }
+        }
+    }
+
+    private func mascotDidMove() {
+        mascotActionID &+= 1
+    }
+}
+
+private struct DashboardHeader: View {
+    let actionID: Int
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Text("Roll Slash")
+                .font(.largeTitle.bold())
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityIdentifier("dashboard-title")
+            RollSlashMascot(actionID: actionID)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+    }
+}
+
+private struct RollSlashMascot: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let actionID: Int
+    @State private var isBobbing = false
+    @State private var isSlashing = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: [RollSlashTheme.violet.opacity(0.95), RollSlashTheme.coral.opacity(0.9)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+            Image(systemName: "photo.stack.fill")
+                .font(.system(size: 18, weight: .bold))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white.opacity(0.9), .white.opacity(0.35))
+                .offset(x: 4, y: 4)
+            Image(systemName: "cat.fill")
+                .font(.system(size: 21, weight: .bold))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.yellow, .orange)
+                .offset(x: -3, y: isBobbing ? -1 : 1)
+            Image(systemName: "scissors")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
+                .rotationEffect(.degrees(isSlashing ? -38 : -8))
+                .offset(x: isSlashing ? 7 : 3, y: isSlashing ? -3 : 4)
+        }
+        .frame(width: 36, height: 36)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Roll Slash mascot")
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
+                isBobbing = true
+            }
+        }
+        .onChange(of: actionID) { _, _ in
+            guard !reduceMotion else { return }
+            withAnimation(.spring(response: 0.2, dampingFraction: 0.55)) {
+                isSlashing.toggle()
             }
         }
     }
@@ -186,10 +265,12 @@ private struct ResumeBanner: View {
 
 private struct GroupList: View {
     @Environment(AppModel.self) private var appModel
+    let onInteraction: () -> Void
+    @State private var dragStarted = false
 
     var body: some View {
         if appModel.grouping == .month {
-            MonthGroupList()
+            MonthGroupList(onInteraction: onInteraction)
         } else {
             ScrollView {
                 LazyVStack(spacing: 12) {
@@ -198,12 +279,23 @@ private struct GroupList: View {
                 .padding(.horizontal)
                 .padding(.bottom, 120)
             }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8)
+                    .onChanged { _ in
+                        guard !dragStarted else { return }
+                        dragStarted = true
+                        onInteraction()
+                    }
+                    .onEnded { _ in dragStarted = false }
+            )
         }
     }
 }
 
 private struct MonthGroupList: View {
     @Environment(AppModel.self) private var appModel
+    let onInteraction: () -> Void
+    @State private var dragStarted = false
     private let columns = [
         GridItem(.flexible(minimum: 0), spacing: 12, alignment: .top),
         GridItem(.flexible(minimum: 0), spacing: 12, alignment: .top)
@@ -245,9 +337,19 @@ private struct MonthGroupList: View {
                     .padding(.trailing, 40)
                     .padding(.bottom, 120)
                 }
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 8)
+                        .onChanged { _ in
+                            guard !dragStarted else { return }
+                            dragStarted = true
+                            onInteraction()
+                        }
+                        .onEnded { _ in dragStarted = false }
+                )
                 VStack(spacing: 8) {
                     ForEach(sections, id: \.0) { year, _ in
                         Button(year) {
+                            onInteraction()
                             withAnimation { proxy.scrollTo(year, anchor: .top) }
                         }
                         .font(.caption2.bold())

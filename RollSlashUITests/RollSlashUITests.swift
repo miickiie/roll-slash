@@ -11,7 +11,7 @@ final class RollSlashUITests: XCTestCase {
         app.launchArguments.append("--ui-testing")
         app.launch()
 
-        XCTAssertTrue(app.navigationBars["Roll Slash"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts.matching(identifier: "dashboard-title").firstMatch.waitForExistence(timeout: 5))
         let firstGroup = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'group-row-'")).firstMatch
         XCTAssertTrue(firstGroup.waitForExistence(timeout: 3))
         firstGroup.tap()
