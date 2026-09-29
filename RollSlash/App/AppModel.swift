@@ -43,6 +43,7 @@ final class AppModel {
     @ObservationIgnored private var hasStarted = false
     @ObservationIgnored private var bucketLocations: [String: ResolvedLocation] = [:]
     @ObservationIgnored private var locationResolutionTask: Task<Void, Never>?
+    @ObservationIgnored private var libraryReloadGeneration = 0
 
     init(
         photoLibrary: any PhotoLibraryClient,
@@ -145,7 +146,12 @@ final class AppModel {
         UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
         permission = await photoLibrary.requestAuthorization()
         route = .dashboard
-        if permission.canRead { await reloadLibrary() }
+        if permission.canRead {
+            await reloadLibrary()
+        } else {
+            libraryReloadGeneration += 1
+            isLoading = false
+        }
     }
 
     func refreshAuthorization() async {
@@ -155,6 +161,8 @@ final class AppModel {
         if permission.canRead {
             await reloadLibrary()
         } else if previousPermission.canRead || !assets.isEmpty {
+            libraryReloadGeneration += 1
+            isLoading = false
             locationResolutionTask?.cancel()
             previewProvider.stopCachingAll()
             assets = []
@@ -174,10 +182,13 @@ final class AppModel {
 
     func reloadLibrary() async {
         guard permission.canRead else { return }
+        libraryReloadGeneration += 1
+        let generation = libraryReloadGeneration
         isLoading = true
-        defer { isLoading = false }
+        defer { if generation == libraryReloadGeneration { isLoading = false } }
         do {
             let fetchedAssets = try await photoLibrary.fetchAssets()
+            guard generation == libraryReloadGeneration, permission.canRead else { return }
             assets = fetchedAssets
             assetIndex = Dictionary(uniqueKeysWithValues: fetchedAssets.map { ($0.id, $0) })
             try refreshDecisionCache()
@@ -185,7 +196,8 @@ final class AppModel {
             try reconcileSessionState(purgeMissingDecisions: permission == .full)
             try refreshDecisionCache()
             try loadCachedLocations()
-            try await rebuildGroupsOffMain()
+            try await rebuildGroupsOffMain(expectedReloadGeneration: generation)
+            guard generation == libraryReloadGeneration, permission.canRead else { return }
             if grouping == .location { resolveMissingLocations() }
             if let session = activeSession,
                session.status == .swiping,
@@ -193,11 +205,12 @@ final class AppModel {
                 finishSwiping()
             }
         } catch {
-            errorMessage = error.localizedDescription
+            if generation == libraryReloadGeneration { errorMessage = error.localizedDescription }
         }
     }
 
     func toggleSelection(_ group: MediaGroup) {
+        guard activeSession == nil else { return }
         if selectedGroupIDs.contains(group.id) {
             selectedGroupIDs.remove(group.id)
         } else {
@@ -274,18 +287,13 @@ final class AppModel {
               session.cursor < session.orderedAssetIDs.count else { return }
         let assetIdentifier = session.orderedAssetIDs[session.cursor]
         do {
-            try repository.trimActions(sessionIdentifier: session.identifier, from: session.cursor)
-            try repository.appendAction(
-                sessionIdentifier: session.identifier,
-                sequence: session.cursor,
-                assetIdentifier: assetIdentifier,
-                decision: decision
+            let sequence = session.cursor
+            let action = try repository.recordDecision(
+                session: session, assetIdentifier: assetIdentifier, decision: decision
             )
-            try repository.setDecision(decision, for: assetIdentifier, sessionIdentifier: session.identifier)
             decisionsByAssetID[assetIdentifier] = decision
-            session.cursor += 1
-            try repository.save()
-            actions = try repository.actions(for: session.identifier)
+            actions.removeAll { $0.sequence >= sequence }
+            actions.append(action)
             if session.cursor == session.orderedAssetIDs.count {
                 finishSwiping()
             } else {
@@ -562,7 +570,7 @@ final class AppModel {
         locationGroups = result.location
     }
 
-    private func rebuildGroupsOffMain() async throws {
+    private func rebuildGroupsOffMain(expectedReloadGeneration: Int? = nil) async throws {
         let completions = try completionSnapshots()
         let assets = assets
         let decisions = decisionsByAssetID
@@ -575,7 +583,9 @@ final class AppModel {
                 bucketLocations: bucketLocations
             )
         }.value
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled,
+              expectedReloadGeneration == nil || expectedReloadGeneration == libraryReloadGeneration,
+              permission.canRead else { return }
         monthGroups = result.month
         locationGroups = result.location
     }

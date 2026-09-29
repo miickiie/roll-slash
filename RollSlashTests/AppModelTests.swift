@@ -127,6 +127,58 @@ struct AppModelTests {
         #expect(harness.model.route == .dashboard)
     }
 
+    @Test("a stale library fetch cannot replace a newer reload")
+    func overlappingReloads() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        harness.client.suspendFetches = true
+        let oldAssets = harness.client.assets
+        let newerAssets = oldAssets.filter { $0.id == "feb" }
+
+        let older = Task { await harness.model.reloadLibrary() }
+        await harness.client.waitForPendingFetches(1)
+        let newer = Task { await harness.model.reloadLibrary() }
+        await harness.client.waitForPendingFetches(2)
+
+        harness.client.finishFetch(at: 1, returning: newerAssets)
+        await newer.value
+        harness.client.finishFetch(at: 0, returning: oldAssets)
+        await older.value
+        #expect(harness.model.assets.map(\.id) == ["feb"])
+        #expect(harness.model.monthGroups.count == 1)
+        #expect(!harness.model.isLoading)
+    }
+
+    @Test("revoked access invalidates an in-flight library fetch")
+    func revokedAccessDuringReload() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        harness.client.suspendFetches = true
+        let reload = Task { await harness.model.reloadLibrary() }
+        await harness.client.waitForPendingFetches(1)
+
+        harness.client.permission = .denied
+        await harness.model.refreshAuthorization()
+        harness.client.finishFetch(at: 0, returning: harness.client.assets)
+        await reload.value
+        #expect(harness.model.assets.isEmpty)
+        #expect(harness.model.monthGroups.isEmpty)
+        #expect(!harness.model.isLoading)
+    }
+
+    @Test("groups cannot be selected while another cleanup is active")
+    func activeSessionBlocksSelection() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        let february = try #require(harness.model.monthGroups.first { $0.key.value == "2026-02" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+        let selectedBefore = harness.model.selectedGroupIDs
+        harness.model.toggleSelection(february)
+        #expect(harness.model.selectedGroupIDs == selectedBefore)
+    }
+
     @Test("limited access does not purge hidden asset decisions")
     func limitedAccessPreservesDecisions() async throws {
         let harness = try makeHarness()
@@ -322,6 +374,23 @@ struct AppModelTests {
         #expect(harness.model.reviewSelectedIDs == Set(["jan-new"]))
     }
 
+    @Test("dashboard scroll anchors stay separate and choose nearby surviving groups")
+    func dashboardScrollAnchors() {
+        var memory = DashboardScrollMemory()
+        memory.reconcileMonth(["month:2026-09", "month:2020-02", "month:2020-01"])
+        memory.monthID = "month:2020-02"
+        memory.reconcileLocation(["location:one", "location:two", "location:three"])
+        memory.locationID = "location:two"
+
+        memory.reconcileMonth(["month:2026-09", "month:2020-03", "month:2020-01"])
+        #expect(memory.monthID == "month:2020-03")
+        #expect(memory.locationID == "location:two")
+
+        memory.reconcileLocation(["location:one", "location:three"])
+        #expect(memory.locationID == "location:three")
+        #expect(memory.monthID == "month:2020-03")
+    }
+
     private func makeHarness(failDeletion: Bool = false) throws -> Harness {
         let calendar = Calendar(identifier: .gregorian)
         let assets = [
@@ -373,6 +442,9 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
     var deletedIdentifiers: [String] = []
     var deletionResultOverride: Set<String>?
     var permission: PhotoPermission = .full
+    var suspendFetches = false
+    private var pendingFetches: [CheckedContinuation<[PhotoAssetDescriptor], Never>] = []
+    private var pendingCountWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
 
     init(assets: [PhotoAssetDescriptor], shouldFailDeletion: Bool) {
         self.assets = assets
@@ -381,7 +453,24 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
 
     func authorizationStatus() -> PhotoPermission { permission }
     func requestAuthorization() async -> PhotoPermission { permission }
-    func fetchAssets() async throws -> [PhotoAssetDescriptor] { assets }
+    func fetchAssets() async throws -> [PhotoAssetDescriptor] {
+        if suspendFetches {
+            return await withCheckedContinuation { continuation in
+                pendingFetches.append(continuation)
+                let ready = pendingCountWaiters.filter { pendingFetches.count >= $0.count }
+                pendingCountWaiters.removeAll { pendingFetches.count >= $0.count }
+                ready.forEach { $0.continuation.resume() }
+            }
+        }
+        return assets
+    }
+    func waitForPendingFetches(_ count: Int) async {
+        if pendingFetches.count >= count { return }
+        await withCheckedContinuation { pendingCountWaiters.append((count, $0)) }
+    }
+    func finishFetch(at index: Int, returning assets: [PhotoAssetDescriptor]) {
+        pendingFetches.remove(at: index).resume(returning: assets)
+    }
     func deleteAssets(with identifiers: [String]) async throws -> Set<String> {
         if shouldFailDeletion { throw TestError.deletionFailed }
         deletedIdentifiers = identifiers

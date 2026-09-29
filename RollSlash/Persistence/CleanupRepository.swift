@@ -12,6 +12,7 @@ protocol CleanupRepository: AnyObject {
     func activeSession() throws -> CleanupSessionRecord?
     func createSession(groupKind: GroupKind, selectedGroupKeys: [String], orderedAssetIDs: [String]) throws -> CleanupSessionRecord
     func actions(for sessionIdentifier: UUID) throws -> [CleanupActionRecord]
+    func recordDecision(session: CleanupSessionRecord, assetIdentifier: String, decision: AssetDecision) throws -> CleanupActionRecord
     func appendAction(sessionIdentifier: UUID, sequence: Int, assetIdentifier: String, decision: AssetDecision) throws
     func trimActions(sessionIdentifier: UUID, from sequence: Int) throws
     func replaceActions(sessionIdentifier: UUID, actions: [CleanupActionSnapshot]) throws
@@ -120,6 +121,25 @@ final class SwiftDataCleanupRepository: CleanupRepository {
             sortBy: [SortDescriptor(\.sequence)]
         )
         return try context.fetch(descriptor)
+    }
+    func recordDecision(session: CleanupSessionRecord, assetIdentifier: String, decision: AssetDecision) throws -> CleanupActionRecord {
+        let sessionIdentifier = session.identifier
+        let sequence = session.cursor
+        let descriptor = FetchDescriptor<CleanupActionRecord>(predicate: #Predicate {
+            $0.sessionIdentifier == sessionIdentifier && $0.sequence >= sequence
+        })
+        try context.fetch(descriptor).forEach(context.delete)
+        let action = CleanupActionRecord(
+            sessionIdentifier: sessionIdentifier,
+            sequence: sequence,
+            assetIdentifier: assetIdentifier,
+            decision: decision
+        )
+        context.insert(action)
+        try upsertDecision(decision, for: assetIdentifier, sessionIdentifier: sessionIdentifier)
+        session.cursor += 1
+        try context.save()
+        return action
     }
 
     func appendAction(sessionIdentifier: UUID, sequence: Int, assetIdentifier: String, decision: AssetDecision) throws {

@@ -3,6 +3,7 @@ import SwiftUI
 struct RootView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.scenePhase) private var scenePhase
+    @State private var dashboardScroll = DashboardScrollMemory()
 
     var body: some View {
         Group {
@@ -10,7 +11,7 @@ struct RootView: View {
             case .onboarding:
                 OnboardingView()
             case .dashboard:
-                DashboardView()
+                DashboardView(scrollMemory: $dashboardScroll)
             case .cleanup:
                 CleanupView()
             case .review:

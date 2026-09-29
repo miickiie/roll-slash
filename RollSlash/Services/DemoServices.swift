@@ -8,14 +8,14 @@ final class DemoPhotoLibraryClient: PhotoLibraryClient {
     private var assets: [PhotoAssetDescriptor]
     private var favoriteIdentifiers: Set<String> = []
 
-    init() {
+    init(referenceDate: Date = .now) {
         let calendar = Calendar(identifier: .gregorian)
         assets = (0..<12).map { index in
-            let date = calendar.date(byAdding: .month, value: -index, to: .now)
+            let date = calendar.date(byAdding: .month, value: -index, to: referenceDate)
             return PhotoAssetDescriptor(
                 id: "demo-\(index)",
                 creationDate: date,
-                coordinate: index.isMultiple(of: 4) ? nil : GeoCoordinate(latitude: 13.7563, longitude: 100.5018),
+            coordinate: index.isMultiple(of: 4) ? nil : GeoCoordinate(latitude: 13.7563 + Double(index), longitude: 100.5018),
                 mediaKind: index.isMultiple(of: 5) ? .video : (index.isMultiple(of: 3) ? .livePhoto : .photo),
                 duration: index.isMultiple(of: 5) ? 18 : 0,
                 pixelWidth: 3024,
@@ -57,7 +57,13 @@ final class DemoPhotoLibraryClient: PhotoLibraryClient {
 @MainActor
 final class DemoMediaPreviewProvider: MediaPreviewProvider {
     func image(for identifier: String, targetSize: CGSize, kind: PreviewRequestKind) async -> UIImage? {
-        let boundedSize = CGSize(width: min(max(targetSize.width, 240), 1200), height: min(max(targetSize.height, 240), 1600))
+        let boundedSize: CGSize
+        if identifier == "demo-2", case .active = kind,
+           targetSize.width <= 900, targetSize.height <= 1200 {
+            boundedSize = CGSize(width: 900, height: 300)
+        } else {
+            boundedSize = CGSize(width: min(max(targetSize.width, 240), 1200), height: min(max(targetSize.height, 240), 1600))
+        }
         let renderer = UIGraphicsImageRenderer(size: boundedSize)
         return renderer.image { context in
             let palette: [(UIColor, UIColor)] = [
@@ -98,6 +104,7 @@ final class DemoMediaPreviewProvider: MediaPreviewProvider {
 
 struct DemoLocationResolver: LocationResolver {
     func resolve(_ coordinate: GeoCoordinate) async throws -> ResolvedLocation? {
-        ResolvedLocation(city: "Bangkok", country: "Thailand")
+        let ordinal = Int((coordinate.latitude - 13.7563).rounded())
+        return ResolvedLocation(city: "Demo Place \(ordinal)", country: "Thailand")
     }
 }

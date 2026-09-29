@@ -1,7 +1,69 @@
 import SwiftUI
 
+struct DashboardScrollMemory {
+    var monthID: String?
+    var locationID: String?
+    var monthAnchorID: String?
+    var locationAnchorID: String?
+    var monthOrder: [String] = []
+    var locationOrder: [String] = []
+
+    mutating func reconcileMonth(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        let anchor = monthAnchorID ?? monthID
+        let resolved: String?
+        if let anchor, !ids.contains(anchor),
+           let target = Self.monthOrdinal(anchor),
+           let nearest = ids.compactMap({ id -> (String, Int)? in
+               guard let ordinal = Self.monthOrdinal(id) else { return nil }
+               return (id, ordinal)
+           }).min(by: { abs($0.1 - target) < abs($1.1 - target) })?.0 {
+            resolved = nearest
+        } else {
+            resolved = Self.validAnchor(anchor, previous: monthOrder, current: ids)
+        }
+        monthAnchorID = resolved
+        monthID = resolved
+        monthOrder = ids
+    }
+
+    mutating func reconcileLocation(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        let resolved = Self.validAnchor(locationAnchorID ?? locationID, previous: locationOrder, current: ids)
+        locationAnchorID = resolved
+        locationID = resolved
+        locationOrder = ids
+    }
+
+    private static func validAnchor(_ anchor: String?, previous: [String], current: [String]) -> String? {
+        guard let anchor else { return nil }
+        guard !current.contains(anchor) else { return anchor }
+        guard !current.isEmpty else { return nil }
+        guard let priorIndex = previous.firstIndex(of: anchor) else { return current.first }
+        let remaining = Set(current)
+        return previous.enumerated()
+            .filter { remaining.contains($0.element) }
+            .min {
+                let firstDistance = abs($0.offset - priorIndex)
+                let secondDistance = abs($1.offset - priorIndex)
+                return firstDistance == secondDistance ? $0.offset > $1.offset : firstDistance < secondDistance
+            }?
+            .element ?? current.first
+    }
+
+    private static func monthOrdinal(_ id: String) -> Int? {
+        guard id.hasPrefix("month:") else { return nil }
+        let parts = id.dropFirst("month:".count).split(separator: "-")
+        guard parts.count == 2,
+              let year = Int(parts[0]), let month = Int(parts[1]),
+              (1...12).contains(month) else { return nil }
+        return year * 12 + month
+    }
+}
+
 struct DashboardView: View {
     @Environment(AppModel.self) private var appModel
+    @Binding var scrollMemory: DashboardScrollMemory
     @State private var mascotActionID = 0
 
     var body: some View {
@@ -45,7 +107,13 @@ struct DashboardView: View {
                 PermissionEmptyState()
             } else {
                 if appModel.isPartialAccess { LimitedAccessBanner() }
-                if appModel.activeSession != nil { ResumeBanner() }
+                if appModel.activeSession != nil {
+                    ResumeBanner()
+                    Text("Finish the current cleanup before selecting more groups.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal)
+                }
                 Picker("Grouping", selection: Binding(
                     get: { appModel.grouping },
                     set: { appModel.grouping = $0 }
@@ -69,12 +137,13 @@ struct DashboardView: View {
                         description: Text("Accessible photos and videos will appear here.")
                     )
                 } else {
-                    GroupList(onInteraction: mascotDidMove)
+                    GroupList(scrollMemory: $scrollMemory, onInteraction: mascotDidMove)
+                        .disabled(appModel.activeSession != nil)
                 }
             }
         }
         .safeAreaInset(edge: .bottom) {
-            if !appModel.selectedGroupIDs.isEmpty {
+            if appModel.activeSession == nil && !appModel.selectedGroupIDs.isEmpty {
                 Button {
                     mascotDidMove()
                     appModel.beginSelectedCleanup()
@@ -319,37 +388,71 @@ private struct ResumeBanner: View {
 
 private struct GroupList: View {
     @Environment(AppModel.self) private var appModel
+    @Binding var scrollMemory: DashboardScrollMemory
     let onInteraction: () -> Void
     @State private var dragStarted = false
+    @State private var didRestoreLocation = false
 
     var body: some View {
         if appModel.grouping == .month {
-            MonthGroupList(onInteraction: onInteraction)
+            MonthGroupList(scrollMemory: $scrollMemory, onInteraction: onInteraction)
         } else {
-            ScrollView {
-                LazyVStack(spacing: 12) {
-                    ForEach(appModel.locationGroups) { group in GroupRow(group: group) }
-                }
-                .padding(.horizontal)
-                .padding(.bottom, 120)
-            }
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 8)
-                    .onChanged { _ in
-                        guard !dragStarted else { return }
-                        dragStarted = true
-                        onInteraction()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(appModel.locationGroups) { group in
+                            GroupRow(group: group, onSelect: { scrollMemory.locationAnchorID = group.id })
+                                .id(group.id)
+                        }
                     }
-                    .onEnded { _ in dragStarted = false }
-            )
+                    .scrollTargetLayout()
+                    .padding(.horizontal)
+                    .padding(.bottom, 120)
+                }
+                .scrollPosition(id: $scrollMemory.locationID)
+                .accessibilityIdentifier("location-group-list")
+                .task(id: appModel.locationGroups.map(\.id)) {
+                    let ids = appModel.locationGroups.map(\.id)
+                    guard !ids.isEmpty else { return }
+                    if didRestoreLocation {
+                        if let anchor = scrollMemory.locationAnchorID, !ids.contains(anchor) {
+                            scrollMemory.reconcileLocation(ids)
+                        } else {
+                            scrollMemory.locationOrder = ids
+                        }
+                        return
+                    }
+                    scrollMemory.reconcileLocation(ids)
+                    didRestoreLocation = true
+                    if let anchor = scrollMemory.locationAnchorID {
+                        await Task.yield()
+                        proxy.scrollTo(anchor, anchor: .center)
+                    }
+                }
+                .onDisappear { didRestoreLocation = false }
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 8)
+                        .onChanged { _ in
+                            guard !dragStarted else { return }
+                            dragStarted = true
+                            onInteraction()
+                        }
+                        .onEnded { _ in
+                            dragStarted = false
+                            if let id = scrollMemory.locationID { scrollMemory.locationAnchorID = id }
+                        }
+                )
+            }
         }
     }
 }
 
 private struct MonthGroupList: View {
     @Environment(AppModel.self) private var appModel
+    @Binding var scrollMemory: DashboardScrollMemory
     let onInteraction: () -> Void
     @State private var dragStarted = false
+    @State private var didRestoreMonth = false
     private let columns = [
         GridItem(.flexible(minimum: 0), spacing: 12, alignment: .top),
         GridItem(.flexible(minimum: 0), spacing: 12, alignment: .top)
@@ -365,6 +468,10 @@ private struct MonthGroupList: View {
         }
     }
 
+    private var orderedGroupIDs: [String] {
+        sections.flatMap { section in section.1.map(\.id) }
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ZStack(alignment: .trailing) {
@@ -374,9 +481,11 @@ private struct MonthGroupList: View {
                             Section {
                                 LazyVGrid(columns: groups.count == 1 ? singleColumn : columns, spacing: 12) {
                                     ForEach(groups) { group in
-                                        MonthGroupCard(group: group)
+                                        MonthGroupCard(group: group, onSelect: { scrollMemory.monthAnchorID = group.id })
+                                            .id(group.id)
                                     }
                                 }
+                                .scrollTargetLayout()
                             } header: {
                                 Text(year)
                                     .font(.title2.bold())
@@ -391,6 +500,26 @@ private struct MonthGroupList: View {
                     .padding(.trailing, 40)
                     .padding(.bottom, 120)
                 }
+                .scrollPosition(id: $scrollMemory.monthID)
+                .accessibilityIdentifier("month-group-list")
+                .task(id: orderedGroupIDs) {
+                    guard !orderedGroupIDs.isEmpty else { return }
+                    if didRestoreMonth {
+                        if let anchor = scrollMemory.monthAnchorID, !orderedGroupIDs.contains(anchor) {
+                            scrollMemory.reconcileMonth(orderedGroupIDs)
+                        } else {
+                            scrollMemory.monthOrder = orderedGroupIDs
+                        }
+                        return
+                    }
+                    scrollMemory.reconcileMonth(orderedGroupIDs)
+                    didRestoreMonth = true
+                    if let anchor = scrollMemory.monthAnchorID {
+                        await Task.yield()
+                        proxy.scrollTo(anchor, anchor: .center)
+                    }
+                }
+                .onDisappear { didRestoreMonth = false }
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 8)
                         .onChanged { _ in
@@ -398,12 +527,16 @@ private struct MonthGroupList: View {
                             dragStarted = true
                             onInteraction()
                         }
-                        .onEnded { _ in dragStarted = false }
+                        .onEnded { _ in
+                            dragStarted = false
+                            if let id = scrollMemory.monthID { scrollMemory.monthAnchorID = id }
+                        }
                 )
                 VStack(spacing: 8) {
-                    ForEach(sections, id: \.0) { year, _ in
+                    ForEach(sections, id: \.0) { year, groups in
                         Button(year) {
                             onInteraction()
+                            scrollMemory.monthAnchorID = groups.first?.id
                             withAnimation { proxy.scrollTo(year, anchor: .top) }
                         }
                         .font(.caption2.bold())
@@ -423,11 +556,13 @@ private struct MonthGroupCard: View {
     @Environment(AppModel.self) private var appModel
     @State private var showingReviewAgainConfirmation = false
     let group: MediaGroup
+    let onSelect: () -> Void
 
     private var selected: Bool { appModel.selectedGroupIDs.contains(group.id) }
 
     var body: some View {
         Button {
+            onSelect()
             if group.isCleaned && !selected {
                 showingReviewAgainConfirmation = true
             } else {
@@ -505,11 +640,13 @@ private struct GroupRow: View {
     @Environment(AppModel.self) private var appModel
     @State private var showingReviewAgainConfirmation = false
     let group: MediaGroup
+    let onSelect: () -> Void
 
     private var selected: Bool { appModel.selectedGroupIDs.contains(group.id) }
 
     var body: some View {
         Button {
+            onSelect()
             if group.isCleaned && !selected {
                 showingReviewAgainConfirmation = true
             } else {

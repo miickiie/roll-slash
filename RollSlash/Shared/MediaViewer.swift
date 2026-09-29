@@ -13,6 +13,7 @@ struct MediaViewer: View {
     let asset: PhotoAssetDescriptor
     var onSwipeLeft: (() -> Void)? = nil
     var onSwipeRight: (() -> Void)? = nil
+    var onDismissSwipe: (() -> Void)? = nil
 
     @State private var image: UIImage?
     @State private var livePhoto: PHLivePhoto?
@@ -236,6 +237,11 @@ struct MediaViewer: View {
         // Previous/Next controls for video review navigation instead.
         guard asset.mediaKind != .video else { return }
         guard zoomScale <= 1.001 else { return }
+        if let onDismissSwipe {
+            guard max(abs(value.translation.width), abs(value.translation.height)) >= 80 else { return }
+            onDismissSwipe()
+            return
+        }
         guard abs(value.translation.width) > abs(value.translation.height) else { return }
         guard abs(value.translation.width) >= 80 else { return }
 

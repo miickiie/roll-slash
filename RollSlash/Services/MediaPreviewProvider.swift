@@ -20,6 +20,8 @@ protocol MediaPreviewProvider: AnyObject {
 @MainActor
 final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
     private let manager = PHCachingImageManager()
+    private var cachedAssets: [String: PHAsset] = [:]
+    private var cachedTargetSize: CGSize?
 
     func image(for identifier: String, targetSize: CGSize, kind: PreviewRequestKind) async -> UIImage? {
         guard let asset = asset(for: identifier) else { return nil }
@@ -80,22 +82,51 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
     }
 
     func startCaching(identifiers: [String], targetSize: CGSize) {
-        // Keep the preheat window bounded. PhotoKit may evict under pressure,
-        // but relying on that would let a long cleanup session retain every
-        // previously preheated card.
-        manager.stopCachingImagesForAllAssets()
-        let result = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
-        var assets: [PHAsset] = []
-        result.enumerateObjects { asset, _, _ in assets.append(asset) }
-        let options = PHImageRequestOptions()
-        options.deliveryMode = .highQualityFormat
-        options.resizeMode = .fast
-        options.isNetworkAccessAllowed = true
-        manager.startCachingImages(for: assets, targetSize: targetSize, contentMode: .aspectFit, options: options)
+        let options = cachingOptions()
+        if let cachedTargetSize, cachedTargetSize != targetSize {
+            manager.stopCachingImages(
+                for: Array(cachedAssets.values), targetSize: cachedTargetSize,
+                contentMode: .aspectFit, options: options
+            )
+            cachedAssets.removeAll()
+        }
+        cachedTargetSize = targetSize
+
+        let requested = Set(identifiers)
+        let removed = cachedAssets.filter { !requested.contains($0.key) }
+        if !removed.isEmpty {
+            manager.stopCachingImages(
+                for: Array(removed.values), targetSize: targetSize,
+                contentMode: .aspectFit, options: options
+            )
+            removed.keys.forEach { cachedAssets.removeValue(forKey: $0) }
+        }
+
+        let missing = identifiers.filter { cachedAssets[$0] == nil }
+        guard !missing.isEmpty else { return }
+        let result = PHAsset.fetchAssets(withLocalIdentifiers: missing, options: nil)
+        var added: [PHAsset] = []
+        result.enumerateObjects { asset, _, _ in
+            self.cachedAssets[asset.localIdentifier] = asset
+            added.append(asset)
+        }
+        manager.startCachingImages(
+            for: added, targetSize: targetSize, contentMode: .aspectFit, options: options
+        )
     }
 
     func stopCachingAll() {
         manager.stopCachingImagesForAllAssets()
+        cachedAssets.removeAll()
+        cachedTargetSize = nil
+    }
+
+    private func cachingOptions() -> PHImageRequestOptions {
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .fast
+        options.isNetworkAccessAllowed = true
+        return options
     }
 
     private func asset(for identifier: String) -> PHAsset? {

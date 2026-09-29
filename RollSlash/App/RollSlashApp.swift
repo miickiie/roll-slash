@@ -21,7 +21,10 @@ struct RollSlashApp: App {
             let previewProvider: any MediaPreviewProvider
             let locationResolver: any LocationResolver
             if isUITesting {
-                photoLibrary = DemoPhotoLibraryClient()
+                let fixtureDate = Calendar(identifier: .gregorian).date(
+                    from: DateComponents(year: 2026, month: 9, day: 15)
+                )!
+                photoLibrary = DemoPhotoLibraryClient(referenceDate: fixtureDate)
                 previewProvider = DemoMediaPreviewProvider()
                 locationResolver = DemoLocationResolver()
             } else {

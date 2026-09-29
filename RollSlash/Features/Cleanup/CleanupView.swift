@@ -6,6 +6,7 @@ struct CleanupView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dragOffset: CGSize = .zero
+    @State private var isDecisionLocked = false
     @State private var showingReviewNowConfirmation = false
     @State private var pendingReviewCurrentBatch = false
 
@@ -91,12 +92,35 @@ struct CleanupView: View {
         }
     }
 
+    private func decideFromButton(_ decision: AssetDecision) {
+        guard !isDecisionLocked else { return }
+        isDecisionLocked = true
+        dragOffset = .zero
+        appModel.decide(decision)
+        unlockDecisionAfterTransition()
+    }
+
+    private func undoFromPhoto() {
+        guard !isDecisionLocked, appModel.canUndo else { return }
+        isDecisionLocked = true
+        dragOffset = .zero
+        appModel.undo()
+        unlockDecisionAfterTransition()
+    }
+
+    private func unlockDecisionAfterTransition() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            isDecisionLocked = false
+        }
+    }
+
     private var deck: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 30).fill(.white.opacity(0.08)).offset(y: 12).scaleEffect(0.94)
             RoundedRectangle(cornerRadius: 30).fill(.white.opacity(0.12)).offset(y: 6).scaleEffect(0.97)
             if let asset = appModel.currentAsset {
-                MediaCardView(asset: asset)
+                MediaCardView(asset: asset, onPhotoTap: undoFromPhoto)
                     .id(asset.id)
                     .offset(dragOffset)
                     .rotationEffect(.degrees(Double(dragOffset.width / 22)))
@@ -109,8 +133,9 @@ struct CleanupView: View {
                     }
                     .gesture(
                         DragGesture()
-                            .onChanged { dragOffset = $0.translation }
+                            .onChanged { if !isDecisionLocked { dragOffset = $0.translation } }
                             .onEnded { value in
+                                guard !isDecisionLocked else { return }
                                 let decision: AssetDecision? = if value.translation.width > 100 {
                                     .keep
                                 } else if value.translation.width < -100 {
@@ -119,19 +144,24 @@ struct CleanupView: View {
                                     nil
                                 }
                                 if let decision {
+                                    isDecisionLocked = true
+                                    let swipedAssetID = asset.id
                                     withAnimation(reduceMotion ? nil : .snappy) {
                                         dragOffset.width = decision == .keep ? 700 : -700
                                     } completion: {
                                         dragOffset = .zero
-                                        appModel.decide(decision)
+                                        if appModel.currentAsset?.id == swipedAssetID {
+                                            appModel.decide(decision)
+                                        }
+                                        unlockDecisionAfterTransition()
                                     }
                                 } else {
                                     withAnimation(.snappy) { dragOffset = .zero }
                                 }
                             }
                     )
-                    .accessibilityAction(named: "Keep") { appModel.decide(.keep) }
-                    .accessibilityAction(named: "Delete") { appModel.decide(.deletePending) }
+                    .accessibilityAction(named: "Keep") { decideFromButton(.keep) }
+                    .accessibilityAction(named: "Delete") { decideFromButton(.deletePending) }
             } else {
                 ProgressView().tint(.white)
             }
@@ -146,25 +176,27 @@ struct CleanupView: View {
                 icon: "xmark",
                 color: RollSlashTheme.coral,
                 accessibilityHint: "Stages this item for deletion. Photos is unchanged until final review."
-            ) { appModel.decide(.deletePending) }
+            ) { decideFromButton(.deletePending) }
+            .disabled(isDecisionLocked)
             .accessibilityIdentifier("decision-delete")
             DecisionButton(
                 title: "Keep",
                 icon: "heart.fill",
                 color: RollSlashTheme.keep,
                 accessibilityHint: "Marks this item as reviewed and keeps it in Photos"
-            ) { appModel.decide(.keep) }
+            ) { decideFromButton(.keep) }
+            .disabled(isDecisionLocked)
             .accessibilityIdentifier("decision-keep")
         }
     }
 
     private var historyButtons: some View {
         HStack(spacing: 24) {
-            Button("Undo", systemImage: "arrow.uturn.backward") { appModel.undo() }
-                .disabled(!appModel.canUndo)
+            Button("Undo", systemImage: "arrow.uturn.backward") { undoFromPhoto() }
+                .disabled(isDecisionLocked || !appModel.canUndo)
                 .accessibilityIdentifier("undo-button")
             Button("Redo", systemImage: "arrow.uturn.forward") { appModel.redo() }
-                .disabled(!appModel.canRedo)
+                .disabled(isDecisionLocked || !appModel.canRedo)
                 .accessibilityIdentifier("redo-button")
         }
         .font(.subheadline.bold())
@@ -211,6 +243,7 @@ private struct DecisionButton: View {
 struct MediaCardView: View {
     @Environment(AppModel.self) private var appModel
     let asset: PhotoAssetDescriptor
+    let onPhotoTap: () -> Void
 
     @State private var image: UIImage?
     @State private var livePhoto: PHLivePhoto?
@@ -270,7 +303,7 @@ struct MediaCardView: View {
             .clipShape(.rect(cornerRadius: 30))
             .task(id: asset.id) { await load(size: proxy.size) }
             .fullScreenCover(isPresented: $showingViewer) {
-                MediaViewer(asset: asset)
+                MediaViewer(asset: asset, onDismissSwipe: { showingViewer = false })
             }
             .onAppear {
                 isVisible = true
@@ -294,7 +327,9 @@ struct MediaCardView: View {
             if let image { photoImage(image) } else { loading }
         case .livePhoto:
             if let livePhoto {
-                LivePhotoPlayer(photo: livePhoto, isPlaying: isLivePlaying)
+                photoContent(size: image?.size ?? CGSize(width: CGFloat(asset.pixelWidth), height: CGFloat(asset.pixelHeight))) {
+                    LivePhotoPlayer(photo: livePhoto, isPlaying: isLivePlaying)
+                }
             } else if let image {
                 photoImage(image)
             } else {
@@ -305,7 +340,7 @@ struct MediaCardView: View {
                 VideoPlayer(player: player)
                     .onAppear { player.play() }
             } else if let image {
-                photoImage(image)
+                Image(uiImage: image).resizable().scaledToFit()
             } else {
                 loading
             }
@@ -313,7 +348,22 @@ struct MediaCardView: View {
     }
 
     private func photoImage(_ image: UIImage) -> some View {
-        Image(uiImage: image).resizable().scaledToFit()
+        photoContent(size: image.size) {
+            Image(uiImage: image).resizable().scaledToFit()
+        }
+    }
+
+    private func photoContent<Content: View>(size: CGSize, @ViewBuilder content: @escaping () -> Content) -> some View {
+        GeometryReader { proxy in
+            let scale = min(proxy.size.width / max(size.width, 1), proxy.size.height / max(size.height, 1))
+            let fittedSize = CGSize(width: size.width * scale, height: size.height * scale)
+            content()
+                .frame(width: fittedSize.width, height: fittedSize.height)
+                .contentShape(Rectangle())
+                .simultaneousGesture(TapGesture().onEnded { onPhotoTap() })
+                .accessibilityIdentifier("cleanup-photo-surface")
+                .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+        }
     }
 
     private var loading: some View {
