@@ -13,7 +13,10 @@ struct MediaViewer: View {
     let asset: PhotoAssetDescriptor
     var onSwipeLeft: (() -> Void)? = nil
     var onSwipeRight: (() -> Void)? = nil
-    var onDismissSwipe: (() -> Void)? = nil
+    var onDismissSwipe: ((CGSize) -> Void)? = nil
+    var onClose: (() -> Void)? = nil
+    var dismissalOffset: CGSize = .zero
+    var dismissalOpacity: Double = 1
 
     @State private var image: UIImage?
     @State private var livePhoto: PHLivePhoto?
@@ -30,10 +33,11 @@ struct MediaViewer: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            Color.black.opacity(dismissalOpacity).ignoresSafeArea()
             content
                 .ignoresSafeArea()
                 .id(asset.id)
+                .offset(dismissalOffset)
 
             VStack {
                 HStack {
@@ -81,7 +85,9 @@ struct MediaViewer: View {
                         .background(.black.opacity(0.55), in: .circle)
                         .accessibilityHint("Toggles sound for this video preview.")
                     }
-                    Button("Close", systemImage: "xmark") { dismiss() }
+                    Button("Close", systemImage: "xmark") {
+                        if let onClose { onClose() } else { dismiss() }
+                    }
                         .labelStyle(.iconOnly)
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(.white)
@@ -94,6 +100,7 @@ struct MediaViewer: View {
                 .padding(.top, 12)
                 Spacer()
             }
+            .opacity(dismissalOpacity)
         }
         .task(id: asset.id) { await load() }
         .onDisappear {
@@ -239,7 +246,7 @@ struct MediaViewer: View {
         guard zoomScale <= 1.001 else { return }
         if let onDismissSwipe {
             guard max(abs(value.translation.width), abs(value.translation.height)) >= 80 else { return }
-            onDismissSwipe()
+            onDismissSwipe(value.translation)
             return
         }
         guard abs(value.translation.width) > abs(value.translation.height) else { return }

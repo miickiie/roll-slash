@@ -89,7 +89,11 @@ final class RollSlashUITests: XCTestCase {
             default: app.swipeDown()
             }
             XCTAssertTrue(openViewer.waitForExistence(timeout: 3))
-            XCTAssertFalse(app.buttons["close-media-viewer"].exists)
+            let closeDisappeared = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "exists == false"),
+                object: app.buttons["close-media-viewer"]
+            )
+            XCTAssertEqual(XCTWaiter.wait(for: [closeDisappeared], timeout: 3), .completed)
             XCTAssertFalse(app.buttons["undo-button"].isEnabled)
         }
 

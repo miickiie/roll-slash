@@ -9,6 +9,10 @@ struct CleanupView: View {
     @State private var isDecisionLocked = false
     @State private var showingReviewNowConfirmation = false
     @State private var pendingReviewCurrentBatch = false
+    @State private var previewAsset: PhotoAssetDescriptor?
+    @State private var previewExitOffset: CGSize = .zero
+    @State private var previewOpacity = 1.0
+    @State private var isPreviewDismissing = false
 
     var body: some View {
         ZStack {
@@ -23,6 +27,24 @@ struct CleanupView: View {
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 10)
+            if let previewAsset {
+                GeometryReader { geometry in
+                    MediaViewer(
+                        asset: previewAsset,
+                        onDismissSwipe: { translation in
+                            dismissPreview(toward: translation, viewport: geometry.size)
+                        },
+                        onClose: {
+                            dismissPreview(toward: CGSize(width: 0, height: 100), viewport: geometry.size)
+                        },
+                        dismissalOffset: previewExitOffset,
+                        dismissalOpacity: previewOpacity
+                    )
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                }
+                .ignoresSafeArea()
+                .zIndex(1)
+            }
         }
         .foregroundStyle(.white)
         .alert("Roll Slash", isPresented: Binding(
@@ -33,6 +55,45 @@ struct CleanupView: View {
         } message: {
             Text(appModel.errorMessage ?? "")
         }
+    }
+
+    private func openPreview(_ asset: PhotoAssetDescriptor) {
+        previewExitOffset = .zero
+        previewOpacity = 1
+        isPreviewDismissing = false
+        previewAsset = asset
+    }
+
+    private func dismissPreview(toward translation: CGSize, viewport: CGSize) {
+        guard previewAsset != nil, !isPreviewDismissing else { return }
+        let length = hypot(translation.width, translation.height)
+        guard length > 0 else { return }
+        isPreviewDismissing = true
+
+        if reduceMotion {
+            finishPreviewDismissal()
+            return
+        }
+
+        let horizontal = translation.width / length
+        let vertical = translation.height / length
+        let horizontalTravel = viewport.width / max(abs(horizontal), 0.001)
+        let verticalTravel = viewport.height / max(abs(vertical), 0.001)
+        let travel = min(horizontalTravel, verticalTravel) + 80
+
+        withAnimation(.easeOut(duration: 0.28)) {
+            previewExitOffset = CGSize(width: horizontal * travel, height: vertical * travel)
+            previewOpacity = 0
+        } completion: {
+            finishPreviewDismissal()
+        }
+    }
+
+    private func finishPreviewDismissal() {
+        previewAsset = nil
+        previewExitOffset = .zero
+        previewOpacity = 1
+        isPreviewDismissing = false
     }
 
     private var header: some View {
@@ -120,7 +181,12 @@ struct CleanupView: View {
             RoundedRectangle(cornerRadius: 30).fill(.white.opacity(0.08)).offset(y: 12).scaleEffect(0.94)
             RoundedRectangle(cornerRadius: 30).fill(.white.opacity(0.12)).offset(y: 6).scaleEffect(0.97)
             if let asset = appModel.currentAsset {
-                MediaCardView(asset: asset, onPhotoTap: undoFromPhoto)
+                MediaCardView(
+                    asset: asset,
+                    onPhotoTap: undoFromPhoto,
+                    onOpenPreview: { openPreview(asset) },
+                    isPreviewOpen: previewAsset != nil
+                )
                     .id(asset.id)
                     .offset(dragOffset)
                     .rotationEffect(.degrees(Double(dragOffset.width / 22)))
@@ -244,6 +310,8 @@ struct MediaCardView: View {
     @Environment(AppModel.self) private var appModel
     let asset: PhotoAssetDescriptor
     let onPhotoTap: () -> Void
+    let onOpenPreview: () -> Void
+    let isPreviewOpen: Bool
 
     @State private var image: UIImage?
     @State private var livePhoto: PHLivePhoto?
@@ -252,7 +320,6 @@ struct MediaCardView: View {
     @State private var isMuted = true
     @State private var failed = false
     @State private var isVisible = false
-    @State private var showingViewer = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -274,7 +341,7 @@ struct MediaCardView: View {
                         mediaBadge
                         Spacer()
                         Button("Open full-screen preview", systemImage: "arrow.up.left.and.arrow.down.right") {
-                            showingViewer = true
+                            onOpenPreview()
                         }
                         .labelStyle(.iconOnly)
                         .buttonStyle(.glass)
@@ -302,16 +369,17 @@ struct MediaCardView: View {
             }
             .clipShape(.rect(cornerRadius: 30))
             .task(id: asset.id) { await load(size: proxy.size) }
-            .fullScreenCover(isPresented: $showingViewer) {
-                MediaViewer(asset: asset, onDismissSwipe: { showingViewer = false })
-            }
             .onAppear {
                 isVisible = true
-                if asset.mediaKind == .video { player?.play() }
+                if asset.mediaKind == .video && !isPreviewOpen { player?.play() }
             }
             .onDisappear {
                 isVisible = false
                 player?.pause()
+            }
+            .onChange(of: isPreviewOpen) { _, isOpen in
+                if isOpen { player?.pause() }
+                else if isVisible && asset.mediaKind == .video { player?.play() }
             }
             .onLongPressGesture(minimumDuration: 0.1, pressing: { pressing in
                 guard asset.mediaKind == .livePhoto else { return }
@@ -338,7 +406,7 @@ struct MediaCardView: View {
         case .video:
             if let player {
                 VideoPlayer(player: player)
-                    .onAppear { player.play() }
+                    .onAppear { if !isPreviewOpen { player.play() } }
             } else if let image {
                 Image(uiImage: image).resizable().scaledToFit()
             } else {
@@ -414,7 +482,7 @@ struct MediaCardView: View {
                 let player = AVPlayer(playerItem: item)
                 player.isMuted = isMuted
                 self.player = player
-                if isVisible { player.play() }
+                if isVisible && !isPreviewOpen { player.play() }
             }
         }
         failed = image == nil && livePhoto == nil && player == nil
