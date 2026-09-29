@@ -311,14 +311,15 @@ private struct ZoomableImage: View {
                                     && zoomScale <= 1.001
                                     && gestureScale <= 1.001
                                     && max(abs(value.translation.width), abs(value.translation.height)) >= 80
-                                offset = clampedOffset(
-                                    CGSize(width: offset.width + value.translation.width, height: offset.height + value.translation.height),
-                                    scale: zoomScale,
-                                    in: proxy.size
-                                )
-                                gestureOffset = .zero
                                 if shouldDismiss {
                                     onDismissSwipe?(value.translation)
+                                } else {
+                                    offset = clampedOffset(
+                                        CGSize(width: offset.width + value.translation.width, height: offset.height + value.translation.height),
+                                        scale: zoomScale,
+                                        in: proxy.size
+                                    )
+                                    gestureOffset = .zero
                                 }
                             }
                     )
