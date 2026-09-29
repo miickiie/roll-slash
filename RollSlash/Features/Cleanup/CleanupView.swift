@@ -29,20 +29,23 @@ struct CleanupView: View {
             .padding(.vertical, 10)
             if let previewAsset {
                 GeometryReader { geometry in
+                    let viewport = CGSize(
+                        width: geometry.size.width,
+                        height: geometry.size.height + geometry.safeAreaInsets.top + geometry.safeAreaInsets.bottom
+                    )
                     MediaViewer(
                         asset: previewAsset,
                         onDismissSwipe: { translation in
-                            dismissPreview(toward: translation, viewport: geometry.size)
+                            dismissPreview(toward: translation, viewport: viewport)
                         },
                         onClose: {
-                            dismissPreview(toward: CGSize(width: 0, height: 100), viewport: geometry.size)
+                            dismissPreview(toward: CGSize(width: 0, height: 100), viewport: viewport)
                         },
                         dismissalOffset: previewExitOffset,
                         dismissalOpacity: previewOpacity
                     )
                     .frame(width: geometry.size.width, height: geometry.size.height)
                 }
-                .ignoresSafeArea()
                 .zIndex(1)
             }
         }
