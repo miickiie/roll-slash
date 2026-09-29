@@ -42,17 +42,18 @@ private final class CleanupMetricsStore {
         }
     }
 
-    func record(sessionID: String, ids: [String], estimatedBytes: [String: Int64]) {
+    func record(sessionID: UUID, ids: [String], estimatedBytes: [String: Int64]) {
+        let sessionKey = sessionID.uuidString
         var changed = false
         for id in Set(ids) {
             let assetKey = Self.assetKey(for: id)
-            if let existing = entries[sessionID]?[assetKey] {
+            if let existing = entries[sessionKey]?[assetKey] {
                 if existing.estimatedBytes == nil, let estimate = estimatedBytes[id] {
-                    entries[sessionID, default: [:]][assetKey] = Entry(estimatedBytes: estimate)
+                    entries[sessionKey, default: [:]][assetKey] = Entry(estimatedBytes: estimate)
                     changed = true
                 }
             } else {
-                entries[sessionID, default: [:]][assetKey] = Entry(estimatedBytes: estimatedBytes[id])
+                entries[sessionKey, default: [:]][assetKey] = Entry(estimatedBytes: estimatedBytes[id])
                 changed = true
             }
         }
@@ -61,10 +62,10 @@ private final class CleanupMetricsStore {
         }
     }
 
-    func summary(for sessionID: String? = nil) -> CleanupMetricsSummary {
+    func summary(for sessionID: UUID? = nil) -> CleanupMetricsSummary {
         let selectedEntries: [Entry]
         if let sessionID {
-            selectedEntries = entries[sessionID].map { Array($0.values) } ?? []
+            selectedEntries = entries[sessionID.uuidString].map { Array($0.values) } ?? []
         } else {
             selectedEntries = entries.values.flatMap { $0.values }
         }
