@@ -30,9 +30,14 @@ protocol PhotoLibraryClient: AnyObject {
     func authorizationStatus() -> PhotoPermission
     func requestAuthorization() async -> PhotoPermission
     func fetchAssets() async throws -> [PhotoAssetDescriptor]
+    func estimateStorageBytes(for identifiers: [String]) async -> [String: Int64]
     func deleteAssets(with identifiers: [String]) async throws -> Set<String>
     func isFavorite(with identifier: String) async -> Bool
     func setFavorite(_ favorite: Bool, for identifier: String) async throws
     func presentLimitedLibraryPicker()
     func openSystemSettings()
+}
+
+extension PhotoLibraryClient {
+    func estimateStorageBytes(for identifiers: [String]) async -> [String: Int64] { [:] }
 }

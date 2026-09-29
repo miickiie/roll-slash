@@ -63,6 +63,32 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
                 ))
             }
             return descriptors
+    }.value
+    }
+
+    func estimateStorageBytes(for identifiers: [String]) async -> [String: Int64] {
+        return await Task.detached(priority: .utility) {
+            guard #available(iOS 27, *) else { return [:] }
+
+            var estimates: [String: Int64] = [:]
+            for identifier in identifiers {
+                let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil)
+                guard let asset = fetchResult.firstObject else { continue }
+                let resources = PHAssetResource.assetResources(for: asset)
+                guard !resources.isEmpty else { continue }
+
+                var total: Int64 = 0
+                var isComplete = true
+                for resource in resources {
+                    guard let resourceBytes = resource.dataSize else {
+                        isComplete = false
+                        break
+                    }
+                    total += Int64(resourceBytes)
+                }
+                if isComplete { estimates[identifier] = total }
+            }
+            return estimates
         }.value
     }
 

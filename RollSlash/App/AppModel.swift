@@ -1,6 +1,91 @@
 import Foundation
 import Observation
 import SwiftData
+import CryptoKit
+
+struct CleanupMetricsSummary: Equatable {
+    let itemCount: Int
+    let estimatedStorageBytes: Int64
+    let unavailableEstimateCount: Int
+
+    static let zero = CleanupMetricsSummary(itemCount: 0, estimatedStorageBytes: 0, unavailableEstimateCount: 0)
+
+    var formattedEstimatedStorage: String {
+        guard estimatedStorageBytes > 0 else {
+            return unavailableEstimateCount > 0 ? String(localized: "Unavailable") : String(localized: "0 bytes")
+        }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: estimatedStorageBytes)
+    }
+}
+
+private final class CleanupMetricsStore {
+    private struct Entry: Codable {
+        var estimatedBytes: Int64?
+    }
+
+    private static let storageKey = "roll-slash.cleanup-metrics.v1"
+    private let defaults: UserDefaults?
+    private var entries: [String: [String: Entry]]
+
+    init() {
+        let process = ProcessInfo.processInfo
+        let isTesting = process.arguments.contains("--ui-testing")
+            || process.environment["XCTestConfigurationFilePath"] != nil
+        defaults = isTesting ? nil : .standard
+        if let data = defaults?.data(forKey: Self.storageKey),
+           let savedEntries = try? JSONDecoder().decode([String: [String: Entry]].self, from: data) {
+            entries = savedEntries
+        } else {
+            entries = [:]
+        }
+    }
+
+    func record(sessionID: String, ids: [String], estimatedBytes: [String: Int64]) {
+        var changed = false
+        for id in Set(ids) {
+            let assetKey = Self.assetKey(for: id)
+            if let existing = entries[sessionID]?[assetKey] {
+                if existing.estimatedBytes == nil, let estimate = estimatedBytes[id] {
+                    entries[sessionID, default: [:]][assetKey] = Entry(estimatedBytes: estimate)
+                    changed = true
+                }
+            } else {
+                entries[sessionID, default: [:]][assetKey] = Entry(estimatedBytes: estimatedBytes[id])
+                changed = true
+            }
+        }
+        if changed, let data = try? JSONEncoder().encode(entries) {
+            defaults?.set(data, forKey: Self.storageKey)
+        }
+    }
+
+    func summary(for sessionID: String? = nil) -> CleanupMetricsSummary {
+        let selectedEntries: [Entry]
+        if let sessionID {
+            selectedEntries = entries[sessionID].map { Array($0.values) } ?? []
+        } else {
+            selectedEntries = entries.values.flatMap { $0.values }
+        }
+        return CleanupMetricsSummary(
+            itemCount: selectedEntries.count,
+            estimatedStorageBytes: selectedEntries.compactMap(\.estimatedBytes).reduce(0, +),
+            unavailableEstimateCount: selectedEntries.filter { $0.estimatedBytes == nil }.count
+        )
+    }
+
+    func reset() {
+        entries.removeAll()
+        defaults?.removeObject(forKey: Self.storageKey)
+    }
+
+    private static func assetKey(for identifier: String) -> String {
+        SHA256.hash(data: Data(identifier.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+}
 
 private struct GroupCompletionSnapshot: Sendable {
     let groupKey: String
@@ -35,11 +120,14 @@ final class AppModel {
     var isDeleting = false
     var errorMessage: String?
     var showingSettings = false
+    private(set) var lifetimeCleanupSummary = CleanupMetricsSummary.zero
+    private(set) var lastCleanupSummary = CleanupMetricsSummary.zero
 
     @ObservationIgnored private let photoLibrary: any PhotoLibraryClient
     @ObservationIgnored let previewProvider: any MediaPreviewProvider
     @ObservationIgnored private let locationResolver: any LocationResolver
     @ObservationIgnored private let repository: any CleanupRepository
+    @ObservationIgnored private let cleanupMetricsStore: CleanupMetricsStore
     @ObservationIgnored private var hasStarted = false
     @ObservationIgnored private var bucketLocations: [String: ResolvedLocation] = [:]
     @ObservationIgnored private var locationResolutionTask: Task<Void, Never>?
@@ -55,6 +143,9 @@ final class AppModel {
         self.previewProvider = previewProvider
         self.locationResolver = locationResolver
         self.repository = SwiftDataCleanupRepository(container: modelContainer)
+        let cleanupMetricsStore = CleanupMetricsStore()
+        self.cleanupMetricsStore = cleanupMetricsStore
+        self.lifetimeCleanupSummary = cleanupMetricsStore.summary()
     }
 
     var visibleGroups: [MediaGroup] {
@@ -434,6 +525,7 @@ final class AppModel {
             return
         }
 
+        let estimatedBytes = selected.isEmpty ? [:] : await photoLibrary.estimateStorageBytes(for: selected)
         if !selected.isEmpty {
             do {
                 let deletedIdentifiers = try await photoLibrary.deleteAssets(with: selected)
@@ -443,6 +535,8 @@ final class AppModel {
                         accessible: deletedIdentifiers.count
                     )
                 }
+                cleanupMetricsStore.record(sessionID: sessionID, ids: selected, estimatedBytes: estimatedBytes)
+                lifetimeCleanupSummary = cleanupMetricsStore.summary()
             } catch {
                 guard activeSession?.identifier == sessionID else { return }
                 session.status = .reviewing
@@ -465,6 +559,9 @@ final class AppModel {
             }
             try finalizeSession(session, markGroupsCompleted: fullyReviewed)
             await reloadLibrary()
+            if fullyReviewed {
+                lastCleanupSummary = cleanupMetricsStore.summary(for: session.identifier)
+            }
             route = fullyReviewed ? .completion : .dashboard
         } catch {
             if selected.isEmpty {
@@ -504,6 +601,9 @@ final class AppModel {
         }
         do {
             try repository.resetHistory()
+            cleanupMetricsStore.reset()
+            lifetimeCleanupSummary = .zero
+            lastCleanupSummary = .zero
             try refreshDecisionCache()
             activeSession = nil
             actions = []
@@ -522,6 +622,7 @@ final class AppModel {
         if candidates.isEmpty {
             do {
                 try finalizeSession(session)
+                lastCleanupSummary = cleanupMetricsStore.summary(for: session.identifier)
                 route = .completion
             } catch {
                 errorMessage = error.localizedDescription
@@ -844,11 +945,16 @@ final class AppModel {
         let stillPresent = submitted.intersection(accessible)
         let confirmedMissing = submitted.subtracting(accessible)
         if !confirmedMissing.isEmpty {
+            cleanupMetricsStore.record(sessionID: session.identifier, ids: Array(confirmedMissing), estimatedBytes: [:])
+            lifetimeCleanupSummary = cleanupMetricsStore.summary()
             try repository.removeDecisions(for: confirmedMissing)
         }
 
         if stillPresent.isEmpty {
             try finalizeSession(session, markGroupsCompleted: fullyReviewed)
+            if fullyReviewed {
+                lastCleanupSummary = cleanupMetricsStore.summary(for: session.identifier)
+            }
             route = fullyReviewed ? .completion : .dashboard
         } else {
             session.reviewSelectedIDs = session.reviewSelectedIDs.filter(stillPresent.contains)

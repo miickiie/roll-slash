@@ -17,7 +17,7 @@ struct SettingsView: View {
                     Button("Open iOS Settings") { appModel.openSystemSettings() }
                 }
                 Section("Privacy") {
-                    Label("Roll Slash stores decisions and cached place names on this iPhone.", systemImage: "iphone")
+                    Label("Roll Slash stores decisions, cleanup totals, and cached place names on this iPhone.", systemImage: "iphone")
                     Label("Original photos and videos are never copied into app storage.", systemImage: "photo.on.rectangle")
                     Label("Only Apple Photos, iCloud, and MapKit may use the network.", systemImage: "network")
                 }
@@ -26,53 +26,68 @@ struct SettingsView: View {
                         showingResetSuccess = false
                         confirmingReset = true
                     }
-        .disabled(appModel.activeSession?.status == .deleting)
-        .fullScreenCover(isPresented: $confirmingReset, onDismiss: { showingResetSuccess = false }) {
-            PopupModal {
-                if showingResetSuccess {
-                    VStack(alignment: .leading, spacing: 14) {
-                        Label("Cleanup history reset", systemImage: "checkmark.circle.fill")
-                            .font(.headline)
-                            .foregroundStyle(RollSlashTheme.keep)
-                        Text("Your Photos library was not changed.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        HStack {
-                            Spacer()
-                            Button("Done") {
-                                showingResetSuccess = false
-                                confirmingReset = false
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
-                    }
-                } else {
-                    VStack(alignment: .leading, spacing: 14) {
-                        Text("Reset cleanup history?")
-                            .font(.headline)
-                        Text("Your Photos library will not change.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        PopupActionRow {
-                            Button("Keep History") { confirmingReset = false }
-                                .buttonStyle(.bordered)
-                        } confirm: {
-                            Button("Reset History", role: .destructive) {
-                                if appModel.resetHistory() {
-                                    showingResetSuccess = true
-                                } else {
-                                    confirmingReset = false
+                    .disabled(appModel.activeSession?.status == .deleting)
+                    .fullScreenCover(isPresented: $confirmingReset, onDismiss: { showingResetSuccess = false }) {
+                        PopupModal {
+                            if showingResetSuccess {
+                                VStack(alignment: .leading, spacing: 14) {
+                                    Label("Cleanup history reset", systemImage: "checkmark.circle.fill")
+                                        .font(.headline)
+                                        .foregroundStyle(RollSlashTheme.keep)
+                                    Text("Your Photos library was not changed.")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                    HStack {
+                                        Spacer()
+                                        Button("Done") {
+                                            showingResetSuccess = false
+                                            confirmingReset = false
+                                        }
+                                        .buttonStyle(.borderedProminent)
+                                    }
+                                }
+                            } else {
+                                VStack(alignment: .leading, spacing: 14) {
+                                    Text("Reset cleanup history?")
+                                        .font(.headline)
+                                    Text("Your Photos library will not change.")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                    PopupActionRow {
+                                        Button("Keep History") { confirmingReset = false }
+                                            .buttonStyle(.bordered)
+                                    } confirm: {
+                                        Button("Reset History", role: .destructive) {
+                                            if appModel.resetHistory() {
+                                                showingResetSuccess = true
+                                            } else {
+                                                confirmingReset = false
+                                            }
+                                        }
+                                        .buttonStyle(.borderedProminent)
+                                        .tint(RollSlashTheme.coral)
+                                    }
                                 }
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(RollSlashTheme.coral)
                         }
                     }
-                }
-            }
-        }
-        Text("This forgets kept decisions and cleaned badges. It never deletes media from Photos.")
+                    Text("This forgets kept decisions, cleaned badges, and cleanup totals. It never deletes media from Photos.")
                         .font(.caption)
+                }
+                Section("Lifetime Cleanup") {
+                    LabeledContent("Items removed", value: "\(appModel.lifetimeCleanupSummary.itemCount)")
+                    LabeledContent(
+                        "Estimated storage (pending recovery)",
+                        value: appModel.lifetimeCleanupSummary.formattedEstimatedStorage
+                    )
+                    if appModel.lifetimeCleanupSummary.unavailableEstimateCount > 0 {
+                        Text("Storage estimate unavailable for \(appModel.lifetimeCleanupSummary.unavailableEstimateCount) items.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("This estimate is not confirmed reclaimed space. Sizes are available only when Photos reports them; some iOS versions and iCloud-only items may have no estimate. Photos may keep removed items in Recently Deleted. Totals start after this update.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 Section("About") {
                     LabeledContent("Roll Slash", value: "1.0")
