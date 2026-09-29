@@ -141,7 +141,7 @@ struct MediaViewer: View {
         case .livePhoto:
             if let livePhoto, let image {
                 ZStack {
-                    ZoomableImage(image: image, zoomScale: $zoomScale)
+                    ZoomableImage(image: image, zoomScale: $zoomScale, onDismissSwipe: onDismissSwipe)
                     if isLivePlaying && zoomScale <= 1.001 {
                         LivePhotoPlayer(photo: livePhoto, isPlaying: true)
                             .allowsHitTesting(false)
@@ -168,7 +168,7 @@ struct MediaViewer: View {
     @ViewBuilder
     private var zoomedStill: some View {
         if let image {
-            ZoomableImage(image: image, zoomScale: $zoomScale)
+            ZoomableImage(image: image, zoomScale: $zoomScale, onDismissSwipe: onDismissSwipe)
         } else if failed {
             ContentUnavailableView {
                 Label("Preview unavailable", systemImage: "icloud.slash")
@@ -240,15 +240,13 @@ struct MediaViewer: View {
     }
 
     private func handleNavigationSwipe(_ value: DragGesture.Value) {
+        // Cleanup dismissal is handled by the fitted photo's gesture so blank
+        // margins around an aspect-fit image cannot dismiss the viewer.
+        guard onDismissSwipe == nil else { return }
         // VideoPlayer owns horizontal drags for scrubbing. Use the explicit
         // Previous/Next controls for video review navigation instead.
         guard asset.mediaKind != .video else { return }
         guard zoomScale <= 1.001 else { return }
-        if let onDismissSwipe {
-            guard max(abs(value.translation.width), abs(value.translation.height)) >= 80 else { return }
-            onDismissSwipe(value.translation)
-            return
-        }
         guard abs(value.translation.width) > abs(value.translation.height) else { return }
         guard abs(value.translation.width) >= 80 else { return }
 
@@ -274,6 +272,7 @@ private struct ZoomableImage: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let image: UIImage
     @Binding var zoomScale: CGFloat
+    var onDismissSwipe: ((CGSize) -> Void)? = nil
 
     @State private var offset = CGSize.zero
     @State private var gestureScale: CGFloat = 1
@@ -296,16 +295,31 @@ private struct ZoomableImage: View {
                                 zoomScale = clampedScale(zoomScale * value.magnification)
                                 gestureScale = 1
                                 offset = clampedOffset(offset, scale: zoomScale, in: proxy.size)
-                            },
+                        },
                         DragGesture()
-                            .onChanged { value in gestureOffset = value.translation }
+                            .onChanged { value in
+                                if onDismissSwipe == nil
+                                    || zoomScale > 1.001
+                                    || fittedPhotoRect(in: proxy.size).contains(value.startLocation) {
+                                    gestureOffset = value.translation
+                                }
+                            }
                             .onEnded { value in
+                                let startsOnPhoto = fittedPhotoRect(in: proxy.size).contains(value.startLocation)
+                                let shouldDismiss = onDismissSwipe != nil
+                                    && startsOnPhoto
+                                    && zoomScale <= 1.001
+                                    && gestureScale <= 1.001
+                                    && max(abs(value.translation.width), abs(value.translation.height)) >= 80
                                 offset = clampedOffset(
                                     CGSize(width: offset.width + value.translation.width, height: offset.height + value.translation.height),
                                     scale: zoomScale,
                                     in: proxy.size
                                 )
                                 gestureOffset = .zero
+                                if shouldDismiss {
+                                    onDismissSwipe?(value.translation)
+                                }
                             }
                     )
                 )
@@ -322,6 +336,18 @@ private struct ZoomableImage: View {
 
     private func clampedScale(_ proposed: CGFloat) -> CGFloat {
         min(max(proposed, 1), 5)
+    }
+
+    private func fittedPhotoRect(in size: CGSize) -> CGRect {
+        guard size.width > 0, size.height > 0, image.size.width > 0, image.size.height > 0 else { return .zero }
+        let fit = min(size.width / image.size.width, size.height / image.size.height)
+        let fittedSize = CGSize(width: image.size.width * fit, height: image.size.height * fit)
+        return CGRect(
+            x: (size.width - fittedSize.width) / 2,
+            y: (size.height - fittedSize.height) / 2,
+            width: fittedSize.width,
+            height: fittedSize.height
+        )
     }
 
     private func clampedOffset(_ proposed: CGSize, scale: CGFloat, in size: CGSize) -> CGSize {
