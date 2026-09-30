@@ -19,7 +19,7 @@ struct SettingsView: View {
                 Section("Privacy") {
                     Label("Roll Slash stores decisions, cleanup totals, and cached place names on this iPhone.", systemImage: "iphone")
                     Label("Original photos and videos are never copied into app storage.", systemImage: "photo.on.rectangle")
-                    Label("Only Apple Photos, iCloud, and MapKit may use the network.", systemImage: "network")
+                    Label("Only Photos, iCloud, and Maps use the network.", systemImage: "network")
                 }
                 Section("Cleanup History") {
                     Button("Reset Cleanup History", role: .destructive) {
@@ -85,7 +85,7 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    Text("This estimate is not confirmed reclaimed space. Sizes are available only when Photos reports them; some iOS versions and iCloud-only items may have no estimate. Photos may keep removed items in Recently Deleted. Totals start after this update.")
+                    Text("Estimate only. Some sizes aren't available, and deleted items may stay in Recently Deleted. Totals start with this version.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

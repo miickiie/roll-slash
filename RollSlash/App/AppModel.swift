@@ -230,7 +230,10 @@ final class AppModel {
             route = .onboarding
         } else {
             route = .dashboard
-            if permission.canRead { await reloadLibrary() }
+            if permission.canRead {
+                photoLibrary.startObservingChanges()
+                await reloadLibrary()
+            }
         }
     }
 
@@ -239,6 +242,7 @@ final class AppModel {
         permission = await photoLibrary.requestAuthorization()
         route = .dashboard
         if permission.canRead {
+            photoLibrary.startObservingChanges()
             await reloadLibrary()
         } else {
             libraryReloadGeneration += 1
@@ -251,6 +255,7 @@ final class AppModel {
         let previousPermission = permission
         permission = photoLibrary.authorizationStatus()
         if permission.canRead {
+            photoLibrary.startObservingChanges()
             await reloadLibrary()
         } else if previousPermission.canRead || !assets.isEmpty {
             libraryReloadGeneration += 1
@@ -270,6 +275,7 @@ final class AppModel {
         UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
         permission = photoLibrary.authorizationStatus()
         route = .dashboard
+        if permission.canRead { photoLibrary.startObservingChanges() }
     }
 
     func reloadLibrary() async {

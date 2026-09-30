@@ -5,14 +5,22 @@ import UIKit
 @MainActor
 final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
     var onLibraryChange: (@MainActor @Sendable () -> Void)?
+    private var isObservingChanges = false
 
     override init() {
         super.init()
-        PHPhotoLibrary.shared().register(self)
     }
 
     deinit {
-        PHPhotoLibrary.shared().unregisterChangeObserver(self)
+        if isObservingChanges {
+            PHPhotoLibrary.shared().unregisterChangeObserver(self)
+        }
+    }
+
+    func startObservingChanges() {
+        guard !isObservingChanges, authorizationStatus().canRead else { return }
+        PHPhotoLibrary.shared().register(self)
+        isObservingChanges = true
     }
 
     func authorizationStatus() -> PhotoPermission {

@@ -29,6 +29,7 @@ protocol PhotoLibraryClient: AnyObject {
     var onLibraryChange: (@MainActor @Sendable () -> Void)? { get set }
     func authorizationStatus() -> PhotoPermission
     func requestAuthorization() async -> PhotoPermission
+    func startObservingChanges()
     func fetchAssets() async throws -> [PhotoAssetDescriptor]
     func estimateStorageBytes(for identifiers: [String]) async -> [String: Int64]
     func deleteAssets(with identifiers: [String]) async throws -> Set<String>
@@ -40,4 +41,5 @@ protocol PhotoLibraryClient: AnyObject {
 
 extension PhotoLibraryClient {
     func estimateStorageBytes(for identifiers: [String]) async -> [String: Int64] { [:] }
+    func startObservingChanges() {}
 }
