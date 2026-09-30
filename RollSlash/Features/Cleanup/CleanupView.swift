@@ -7,6 +7,9 @@ struct CleanupView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dragOffset: CGSize = .zero
     @State private var isDecisionLocked = false
+    @State private var actionStamp: ActionStamp?
+    @State private var actionTask: Task<Void, Never>?
+    @State private var unlockTask: Task<Void, Never>?
     @State private var showingReviewNowConfirmation = false
     @State private var pendingReviewCurrentBatch = false
     @State private var previewAsset: PhotoAssetDescriptor?
@@ -58,9 +61,16 @@ struct CleanupView: View {
         } message: {
             Text(appModel.errorMessage ?? "")
         }
+        .onDisappear {
+            actionTask?.cancel()
+            unlockTask?.cancel()
+            actionStamp = nil
+            isDecisionLocked = false
+        }
     }
 
     private func openPreview(_ asset: PhotoAssetDescriptor) {
+        guard !isDecisionLocked else { return }
         previewExitOffset = .zero
         previewOpacity = 1
         isPreviewDismissing = false
@@ -105,6 +115,7 @@ struct CleanupView: View {
                 Button("Close", systemImage: "chevron.down") { appModel.route = .dashboard }
                     .labelStyle(.iconOnly)
                     .buttonStyle(.glass)
+                    .disabled(isDecisionLocked)
             Spacer()
             VStack(spacing: 1) {
                 Text("\(appModel.sessionRemaining) left").font(.headline)
@@ -118,7 +129,7 @@ struct CleanupView: View {
             }
             .labelStyle(.iconOnly)
             .buttonStyle(.glass)
-            .disabled(appModel.deleteCount == 0)
+            .disabled(appModel.deleteCount == 0 || isDecisionLocked)
             .accessibilityIdentifier("review-now")
             .accessibilityHint("Review items currently marked for deletion now, while leaving unswiped items for later.")
             .fullScreenCover(
@@ -157,24 +168,81 @@ struct CleanupView: View {
     }
 
     private func decideFromButton(_ decision: AssetDecision) {
-        guard !isDecisionLocked else { return }
-        isDecisionLocked = true
+        guard !isDecisionLocked, let assetID = appModel.currentAsset?.id else { return }
         dragOffset = .zero
-        appModel.decide(decision)
-        unlockDecisionAfterTransition()
+        commitDecision(decision, for: assetID)
     }
 
     private func undoFromPhoto() {
-        guard !isDecisionLocked, appModel.canUndo else { return }
+        guard appModel.canUndo, let assetID = appModel.currentAsset?.id else { return }
+        showStampThenAct(.undo, for: assetID)
+    }
+
+    private func redoFromButton() {
+        guard appModel.canRedo, let assetID = appModel.currentAsset?.id else { return }
+        showStampThenAct(.redo, for: assetID)
+    }
+
+    private func commitDecision(_ decision: AssetDecision, for assetID: String) {
+        guard !isDecisionLocked, let sessionID = appModel.activeSession?.identifier else { return }
+        if reduceMotion {
+            showStampThenAct(decision == .keep ? .keep : .delete, for: assetID)
+            return
+        }
+
+        isDecisionLocked = true
+        withAnimation(.snappy) {
+            dragOffset.width = decision == .keep ? 700 : -700
+        } completion: {
+            dragOffset = .zero
+            if appModel.route == .cleanup,
+               appModel.activeSession?.identifier == sessionID,
+               appModel.currentAsset?.id == assetID {
+                appModel.decide(decision)
+            }
+            unlockDecisionAfterTransition()
+        }
+    }
+
+    private func showStampThenAct(_ stamp: ActionStamp, for assetID: String) {
+        guard !isDecisionLocked, let sessionID = appModel.activeSession?.identifier else { return }
         isDecisionLocked = true
         dragOffset = .zero
-        appModel.undo()
-        unlockDecisionAfterTransition()
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
+            actionStamp = stamp
+        }
+        actionTask?.cancel()
+        actionTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .milliseconds(350))
+            } catch {
+                return
+            }
+            withAnimation(reduceMotion ? nil : .easeIn(duration: 0.12)) {
+                actionStamp = nil
+            }
+            if appModel.route == .cleanup,
+               appModel.activeSession?.identifier == sessionID,
+               appModel.currentAsset?.id == assetID {
+                switch stamp {
+                case .keep: appModel.decide(.keep)
+                case .delete: appModel.decide(.deletePending)
+                case .undo: if appModel.canUndo { appModel.undo() }
+                case .redo: if appModel.canRedo { appModel.redo() }
+                }
+            }
+            unlockDecisionAfterTransition()
+        }
     }
 
     private func unlockDecisionAfterTransition() {
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(300))
+        unlockTask?.cancel()
+        unlockTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .milliseconds(300))
+            } catch {
+                return
+            }
             isDecisionLocked = false
         }
     }
@@ -195,9 +263,17 @@ struct CleanupView: View {
                     .rotationEffect(.degrees(Double(dragOffset.width / 22)))
                     .overlay(alignment: dragOffset.width >= 0 ? .topLeading : .topTrailing) {
                         if abs(dragOffset.width) > 35 {
-                            SwipeStamp(decision: dragOffset.width > 0 ? .keep : .deletePending)
+                            SwipeStamp(action: dragOffset.width > 0 ? .keep : .delete)
                                 .padding(24)
                                 .opacity(min(1, abs(dragOffset.width) / 110))
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .overlay {
+                        if let actionStamp {
+                            SwipeStamp(action: actionStamp)
+                                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                                .allowsHitTesting(false)
                         }
                     }
                     .gesture(
@@ -213,19 +289,9 @@ struct CleanupView: View {
                                     nil
                                 }
                                 if let decision {
-                                    isDecisionLocked = true
-                                    let swipedAssetID = asset.id
-                                    withAnimation(reduceMotion ? nil : .snappy) {
-                                        dragOffset.width = decision == .keep ? 700 : -700
-                                    } completion: {
-                                        dragOffset = .zero
-                                        if appModel.currentAsset?.id == swipedAssetID {
-                                            appModel.decide(decision)
-                                        }
-                                        unlockDecisionAfterTransition()
-                                    }
+                                    commitDecision(decision, for: asset.id)
                                 } else {
-                                    withAnimation(.snappy) { dragOffset = .zero }
+                                    withAnimation(reduceMotion ? nil : .snappy) { dragOffset = .zero }
                                 }
                             }
                     )
@@ -264,7 +330,7 @@ struct CleanupView: View {
             Button("Undo", systemImage: "arrow.uturn.backward") { undoFromPhoto() }
                 .disabled(isDecisionLocked || !appModel.canUndo)
                 .accessibilityIdentifier("undo-button")
-            Button("Redo", systemImage: "arrow.uturn.forward") { appModel.redo() }
+            Button("Redo", systemImage: "arrow.uturn.forward") { redoFromButton() }
                 .disabled(isDecisionLocked || !appModel.canRedo)
                 .accessibilityIdentifier("redo-button")
         }
@@ -273,17 +339,51 @@ struct CleanupView: View {
     }
 }
 
+private enum ActionStamp {
+    case keep
+    case delete
+    case undo
+    case redo
+
+    var title: LocalizedStringKey {
+        switch self {
+        case .keep: "KEEP"
+        case .delete: "DELETE"
+        case .undo: "UNDO"
+        case .redo: "REDO"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .keep: "heart.fill"
+        case .delete: "xmark"
+        case .undo: "arrow.uturn.backward"
+        case .redo: "arrow.uturn.forward"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .keep: RollSlashTheme.keep
+        case .delete: RollSlashTheme.coral
+        case .undo, .redo: .white
+        }
+    }
+}
+
 private struct SwipeStamp: View {
-    let decision: AssetDecision
+    let action: ActionStamp
 
     var body: some View {
-        Label(decision == .keep ? "KEEP" : "DELETE", systemImage: decision == .keep ? "heart.fill" : "xmark")
+        Label(action.title, systemImage: action.symbol)
             .font(.title.bold())
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
-            .foregroundStyle(decision == .keep ? RollSlashTheme.keep : RollSlashTheme.coral)
-            .background(.black.opacity(0.48), in: .capsule)
-            .overlay(Capsule().stroke(decision == .keep ? RollSlashTheme.keep : RollSlashTheme.coral, lineWidth: 3))
+            .foregroundStyle(action.color)
+            .background(.black.opacity(0.72), in: .capsule)
+            .overlay(Capsule().stroke(action.color, lineWidth: 3))
+            .shadow(color: .black.opacity(0.45), radius: 8)
     }
 }
 
