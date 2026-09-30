@@ -34,73 +34,28 @@ struct MediaViewer: View {
     var body: some View {
         ZStack {
             Color.black.opacity(dismissalOpacity).ignoresSafeArea()
-            content
-                .ignoresSafeArea()
-                .id(asset.id)
-                .offset(dismissalOffset)
-
-            VStack {
-                HStack {
-                    Text(asset.mediaKind == .video ? "Video preview" : "Photo preview")
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                    Spacer()
-                    if image != nil {
-                        Button(
-                            isFavorite ? "Remove from Favorites" : "Add to Favorites",
-                            systemImage: isFavorite ? "heart.fill" : "heart"
-                        ) {
-                            toggleFavorite()
-                        }
-                        .labelStyle(.iconOnly)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(isFavorite ? RollSlashTheme.coral : .white)
-                        .padding(12)
-                        .background(.black.opacity(0.55), in: .circle)
-                        .disabled(isUpdatingFavorite)
-                        .accessibilityIdentifier("favorite-media")
-                        .accessibilityLabel(isFavorite ? "Remove from Favorites" : "Add to Favorites")
-                    }
-                    if image != nil {
-                        Button("Share", systemImage: "square.and.arrow.up") {
-                            showingShareSheet = true
-                        }
-                        .labelStyle(.iconOnly)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .padding(12)
-                        .background(.black.opacity(0.55), in: .circle)
-                        .accessibilityIdentifier("share-media")
-                        .accessibilityLabel("Share photo")
-                    }
-                    if asset.mediaKind == .video {
-                        Button(isMuted ? "Unmute" : "Mute", systemImage: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") {
-                            isMuted.toggle()
-                            player?.isMuted = isMuted
-                        }
-                        .labelStyle(.iconOnly)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .padding(12)
-                        .background(.black.opacity(0.55), in: .circle)
-                        .accessibilityHint("Toggles sound for this video preview.")
-                    }
-                    Button("Close", systemImage: "xmark") {
-                        if let onClose { onClose() } else { dismiss() }
-                    }
-                        .labelStyle(.iconOnly)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .padding(12)
-                        .background(.black.opacity(0.55), in: .circle)
-                        .accessibilityIdentifier("close-media-viewer")
-                        .accessibilityLabel("Close full-screen preview")
+            if asset.mediaKind == .video {
+                VStack(spacing: 0) {
+                    viewerToolbar
+                        .background(.black.opacity(0.72))
+                        .opacity(dismissalOpacity)
+                    content
+                        .id(asset.id)
+                        .offset(dismissalOffset)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .padding(.horizontal, 18)
-                .padding(.top, 12)
-                Spacer()
+                .ignoresSafeArea(edges: .bottom)
+            } else {
+                content
+                    .ignoresSafeArea()
+                    .id(asset.id)
+                    .offset(dismissalOffset)
+
+                VStack {
+                    viewerToolbar.opacity(dismissalOpacity)
+                    Spacer()
+                }
             }
-            .opacity(dismissalOpacity)
         }
         .task(id: asset.id) { await load() }
         .onDisappear {
@@ -187,6 +142,68 @@ struct MediaViewer: View {
         ProgressView("Loading preview…")
             .tint(.white)
             .foregroundStyle(.white)
+    }
+
+    private var viewerToolbar: some View {
+        HStack {
+            Text(asset.mediaKind == .video ? "Video preview" : "Photo preview")
+                .font(.headline)
+                .foregroundStyle(.white)
+            Spacer()
+            if image != nil {
+                Button(
+                    isFavorite ? "Remove from Favorites" : "Add to Favorites",
+                    systemImage: isFavorite ? "heart.fill" : "heart"
+                ) {
+                    toggleFavorite()
+                }
+                .labelStyle(.iconOnly)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(isFavorite ? RollSlashTheme.coral : .white)
+                .padding(12)
+                .background(.black.opacity(0.55), in: .circle)
+                .disabled(isUpdatingFavorite)
+                .accessibilityIdentifier("favorite-media")
+                .accessibilityLabel(isFavorite ? "Remove from Favorites" : "Add to Favorites")
+            }
+            if image != nil {
+                Button("Share", systemImage: "square.and.arrow.up") {
+                    showingShareSheet = true
+                }
+                .labelStyle(.iconOnly)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(12)
+                .background(.black.opacity(0.55), in: .circle)
+                .accessibilityIdentifier("share-media")
+                .accessibilityLabel("Share photo")
+            }
+            if asset.mediaKind == .video {
+                Button(isMuted ? "Unmute" : "Mute", systemImage: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") {
+                    isMuted.toggle()
+                    player?.isMuted = isMuted
+                }
+                .labelStyle(.iconOnly)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(12)
+                .background(.black.opacity(0.55), in: .circle)
+                .accessibilityHint("Toggles sound for this video preview.")
+            }
+            Button("Close", systemImage: "xmark") {
+                if let onClose { onClose() } else { dismiss() }
+            }
+            .labelStyle(.iconOnly)
+            .font(.title3.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(12)
+            .background(.black.opacity(0.55), in: .circle)
+            .accessibilityIdentifier("close-media-viewer")
+            .accessibilityLabel("Close full-screen preview")
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
     }
 
     private func load() async {
