@@ -3,6 +3,7 @@ import Photos
 import PhotosUI
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// A distraction-free preview used when a card or review tile needs closer inspection.
 /// Decision gestures intentionally live outside this view.
@@ -77,9 +78,9 @@ struct MediaViewer: View {
             isPreparingShare = false
         }
         .sheet(isPresented: $showingShareSheet, onDismiss: cleanUpSharedVideo) {
-            if let shareURL {
-                ShareSheet(items: [shareURL])
-            } else if let image {
+            if asset.mediaKind == .video, let shareURL {
+                ShareSheet(items: [VideoActivityItemSource(url: shareURL)])
+            } else if asset.mediaKind != .video, let image {
                 ShareSheet(items: [image])
             }
         }
@@ -358,6 +359,32 @@ private struct ShareSheet: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
+
+private final class VideoActivityItemSource: NSObject, UIActivityItemSource {
+    private let url: URL
+
+    init(url: URL) {
+        self.url = url
+    }
+
+    func activityViewControllerPlaceholderItem(_ activityViewController: UIActivityViewController) -> Any {
+        url
+    }
+
+    func activityViewController(
+        _ activityViewController: UIActivityViewController,
+        itemForActivityType activityType: UIActivity.ActivityType?
+    ) -> Any? {
+        url
+    }
+
+    func activityViewController(
+        _ activityViewController: UIActivityViewController,
+        dataTypeIdentifierForActivityType activityType: UIActivity.ActivityType?
+    ) -> String {
+        UTType(filenameExtension: url.pathExtension)?.identifier ?? UTType.movie.identifier
+    }
 }
 
 private struct ZoomableImage: View {
