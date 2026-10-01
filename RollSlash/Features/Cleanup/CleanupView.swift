@@ -13,6 +13,7 @@ struct CleanupView: View {
     @State private var showingReviewNowConfirmation = false
     @State private var pendingReviewCurrentBatch = false
     @State private var previewAsset: PhotoAssetDescriptor?
+    @State private var previewImage: UIImage?
     @State private var previewExitOffset: CGSize = .zero
     @State private var previewOpacity = 1.0
     @State private var isPreviewDismissing = false
@@ -38,6 +39,7 @@ struct CleanupView: View {
                     )
                     MediaViewer(
                         asset: previewAsset,
+                        initialImage: previewImage,
                         onDismissSwipe: { translation in
                             dismissPreview(toward: translation, viewport: viewport)
                         },
@@ -69,11 +71,12 @@ struct CleanupView: View {
         }
     }
 
-    private func openPreview(_ asset: PhotoAssetDescriptor) {
+    private func openPreview(_ asset: PhotoAssetDescriptor, image: UIImage?) {
         guard !isDecisionLocked else { return }
         previewExitOffset = .zero
         previewOpacity = 1
         isPreviewDismissing = false
+        previewImage = image
         previewAsset = asset
     }
 
@@ -104,6 +107,7 @@ struct CleanupView: View {
 
     private func finishPreviewDismissal() {
         previewAsset = nil
+        previewImage = nil
         previewExitOffset = .zero
         previewOpacity = 1
         isPreviewDismissing = false
@@ -128,7 +132,7 @@ struct CleanupView: View {
                 if appModel.deleteCount > 0 {
                     showingReviewNowConfirmation = true
                 } else {
-                    appModel.finishCurrentSession()
+                    Task { await appModel.finishCurrentSession() }
                 }
             }
             .labelStyle(.iconOnly)
@@ -204,9 +208,13 @@ struct CleanupView: View {
             if appModel.route == .cleanup,
                appModel.activeSession?.identifier == sessionID,
                appModel.currentAsset?.id == assetID {
-                appModel.decide(decision)
+                Task {
+                    await appModel.decide(decision)
+                    unlockDecisionAfterTransition()
+                }
+            } else {
+                unlockDecisionAfterTransition()
             }
-            unlockDecisionAfterTransition()
         }
     }
 
@@ -231,10 +239,10 @@ struct CleanupView: View {
                appModel.activeSession?.identifier == sessionID,
                appModel.currentAsset?.id == assetID {
                 switch stamp {
-                case .keep: appModel.decide(.keep)
-                case .delete: appModel.decide(.deletePending)
+                case .keep: await appModel.decide(.keep)
+                case .delete: await appModel.decide(.deletePending)
                 case .undo: if appModel.canUndo { appModel.undo() }
-                case .redo: if appModel.canRedo { appModel.redo() }
+                case .redo: if appModel.canRedo { await appModel.redo() }
                 }
             }
             unlockDecisionAfterTransition()
@@ -261,7 +269,7 @@ struct CleanupView: View {
                 MediaCardView(
                     asset: asset,
                     onPhotoTap: undoFromPhoto,
-                    onOpenPreview: { openPreview(asset) },
+                    onOpenPreview: { image in openPreview(asset, image: image) },
                     isPreviewOpen: previewAsset != nil
                 )
                     .id(asset.id)
@@ -304,7 +312,7 @@ struct CleanupView: View {
                     .accessibilityAction(named: "Keep") { decideFromButton(.keep) }
                     .accessibilityAction(named: "Delete") { decideFromButton(.deletePending) }
             } else {
-                ProgressView().tint(.white)
+                ProgressView("Updating groups…").tint(.white)
             }
         }
         .aspectRatio(0.76, contentMode: .fit)
@@ -419,7 +427,7 @@ struct MediaCardView: View {
     @Environment(AppModel.self) private var appModel
     let asset: PhotoAssetDescriptor
     let onPhotoTap: () -> Void
-    let onOpenPreview: () -> Void
+    let onOpenPreview: (UIImage?) -> Void
     let isPreviewOpen: Bool
 
     @State private var image: UIImage?
@@ -450,7 +458,7 @@ struct MediaCardView: View {
                         mediaBadge
                         Spacer()
                         Button("Open full-screen preview", systemImage: "arrow.up.left.and.arrow.down.right") {
-                            onOpenPreview()
+                            onOpenPreview(image)
                         }
                         .labelStyle(.iconOnly)
                         .buttonStyle(.glass)
@@ -576,15 +584,16 @@ struct MediaCardView: View {
     private func load(size: CGSize) async {
         failed = false
         let target = CGSize(width: 900, height: 1200)
-        let loadedImage = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active)
-        guard !Task.isCancelled else { return }
-        image = loadedImage
         switch asset.mediaKind {
-        case .photo: break
-        case .livePhoto:
-            let loadedLivePhoto = await appModel.previewProvider.livePhoto(for: asset.id, targetSize: target)
+        case .photo, .livePhoto:
+            let loadedImage = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active)
             guard !Task.isCancelled else { return }
-            livePhoto = loadedLivePhoto
+            image = loadedImage
+            if asset.mediaKind == .livePhoto {
+                let loadedLivePhoto = await appModel.previewProvider.livePhoto(for: asset.id, targetSize: target)
+                guard !Task.isCancelled else { return }
+                livePhoto = loadedLivePhoto
+            }
         case .video:
             if let item = await appModel.previewProvider.playerItem(for: asset.id) {
                 guard !Task.isCancelled else { return }
@@ -592,6 +601,10 @@ struct MediaCardView: View {
                 player.isMuted = isMuted
                 self.player = player
                 if isVisible && !isPreviewOpen { player.play() }
+            } else {
+                let loadedImage = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active)
+                guard !Task.isCancelled else { return }
+                image = loadedImage
             }
         }
         failed = image == nil && livePhoto == nil && player == nil

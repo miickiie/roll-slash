@@ -2,7 +2,7 @@ import SwiftUI
 
 struct ReviewView: View {
     @Environment(AppModel.self) private var appModel
-    @State private var focusedIdentifier: String?
+    @State private var focusedPreview: PreviewIdentifier?
 
     private let columns = Array(repeating: GridItem(.flexible(minimum: 0), spacing: 4), count: 4)
 
@@ -25,24 +25,27 @@ struct ReviewView: View {
     }
 
     var body: some View {
+        let candidateIDs = appModel.reviewCandidateIDs
+        let selectedIDs = appModel.reviewSelectedIDs
+        let allSelected = !candidateIDs.isEmpty && Set(candidateIDs).isSubset(of: selectedIDs)
         NavigationStack {
             VStack(spacing: 0) {
                 HStack {
-                    Text("\(appModel.reviewSelectedIDs.count) selected for deletion")
+                    Text("\(selectedIDs.count) selected for deletion")
                         .font(.subheadline.bold())
                     Spacer()
                     Toggle(isOn: selectAllBinding) {
                         Label(
                             "Select All",
-                            systemImage: allCandidatesSelected ? "checkmark.circle.fill" : "checkmark.circle"
+                            systemImage: allSelected ? "checkmark.circle.fill" : "checkmark.circle"
                         )
                     }
                     .toggleStyle(.button)
                     .buttonStyle(.bordered)
-                    .disabled(appModel.reviewCandidateIDs.isEmpty)
+                    .disabled(candidateIDs.isEmpty)
                     .accessibilityIdentifier("select-all")
                     .accessibilityHint(
-                        allCandidatesSelected
+                        allSelected
                             ? "Keeps every item in this review."
                             : "Selects every item in this review for deletion."
                     )
@@ -51,14 +54,14 @@ struct ReviewView: View {
 
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 3) {
-                        ForEach(appModel.reviewCandidateIDs, id: \.self) { identifier in
+                        ForEach(candidateIDs, id: \.self) { identifier in
                             ReviewTile(
                                 identifier: identifier,
-                                isSelected: appModel.reviewSelectedIDs.contains(identifier)
+                                isSelected: selectedIDs.contains(identifier)
                             ) {
                                 appModel.toggleReviewSelection(identifier)
-                            } preview: {
-                                focusedIdentifier = identifier
+                            } preview: { image in
+                                focusedPreview = PreviewIdentifier(id: identifier, image: image)
                             }
                         }
                     }
@@ -83,27 +86,24 @@ struct ReviewView: View {
                 } label: {
                     HStack {
                         if appModel.isDeleting { ProgressView().tint(.white) }
-            Text(appModel.reviewSelectedIDs.isEmpty
-                 ? (appModel.sessionRemaining > 0 ? "Finish this batch" : "Finish without deleting")
-                 : "Delete \(appModel.reviewSelectedIDs.count) items")
+                        Text(selectedIDs.isEmpty
+                             ? (appModel.sessionRemaining > 0 ? "Finish this batch" : "Finish without deleting")
+                             : "Delete \(selectedIDs.count) items")
                             .font(.headline)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 7)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(appModel.reviewSelectedIDs.isEmpty ? RollSlashTheme.violet : RollSlashTheme.coral)
+                .tint(selectedIDs.isEmpty ? RollSlashTheme.violet : RollSlashTheme.coral)
                 .disabled(appModel.isDeleting)
                 .accessibilityIdentifier("commit-deletion")
                 .padding()
                 .background(.ultraThinMaterial)
             }
-.fullScreenCover(item: Binding(
-    get: { focusedIdentifier.map(PreviewIdentifier.init) },
-    set: { focusedIdentifier = $0?.id }
-)) { item in
-    ReviewMediaViewer(initialIdentifier: item.id)
-}
+            .fullScreenCover(item: $focusedPreview) { item in
+                ReviewMediaViewer(initialIdentifier: item.id, initialImage: item.image)
+            }
             .alert("Deletion did not complete", isPresented: Binding(
                 get: { appModel.errorMessage != nil },
                 set: { if !$0 { appModel.errorMessage = nil } }
@@ -118,6 +118,7 @@ struct ReviewView: View {
 
 private struct PreviewIdentifier: Identifiable {
     let id: String
+    let image: UIImage?
 }
 
 private struct ReviewMediaViewer: View {
@@ -125,10 +126,12 @@ private struct ReviewMediaViewer: View {
     @Environment(\.dismiss) private var dismiss
 
     let initialIdentifier: String
+    let initialImage: UIImage?
     @State private var currentIdentifier: String
 
-    init(initialIdentifier: String) {
+    init(initialIdentifier: String, initialImage: UIImage?) {
         self.initialIdentifier = initialIdentifier
+        self.initialImage = initialImage
         _currentIdentifier = State(initialValue: initialIdentifier)
     }
 
@@ -155,6 +158,7 @@ private struct ReviewMediaViewer: View {
             if let currentAsset, let currentIndex {
                 MediaViewer(
                     asset: currentAsset,
+                    initialImage: currentIdentifier == initialIdentifier ? initialImage : nil,
                     onSwipeLeft: advance,
                     onSwipeRight: goBack
                 )
@@ -258,13 +262,18 @@ private struct ReviewTile: View {
     let identifier: String
     let isSelected: Bool
     let toggle: () -> Void
-    let preview: () -> Void
+    let preview: (UIImage?) -> Void
+    @State private var thumbnailImage: UIImage?
 
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .topTrailing) {
-                Button(action: preview) {
-                    MediaThumbnailView(identifier: identifier, size: CGSize(width: 140, height: 96))
+                Button { preview(thumbnailImage) } label: {
+                    MediaThumbnailView(
+                        identifier: identifier,
+                        size: CGSize(width: 140, height: 96),
+                        onImageLoaded: { thumbnailImage = $0 }
+                    )
                         .frame(width: proxy.size.width, height: proxy.size.height)
                         .clipped()
                         .contentShape(Rectangle())

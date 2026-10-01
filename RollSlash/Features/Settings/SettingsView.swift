@@ -18,7 +18,7 @@ struct SettingsView: View {
                 }
                 Section("Privacy") {
                     Label("Roll Slash stores decisions, cleanup totals, and cached place names on this iPhone.", systemImage: "iphone")
-                    Label("Original photos and videos are never copied into app storage.", systemImage: "photo.on.rectangle")
+                    Label("Photos are not kept in app storage. Sharing a video creates a temporary copy that is removed after sharing.", systemImage: "photo.on.rectangle")
                     Label("Only Photos, iCloud, and Maps use the network.", systemImage: "network")
                 }
                 Section("Cleanup History") {
@@ -58,10 +58,12 @@ struct SettingsView: View {
                                             .buttonStyle(.bordered)
                                     } confirm: {
                                         Button("Reset History", role: .destructive) {
-                                            if appModel.resetHistory() {
-                                                showingResetSuccess = true
-                                            } else {
-                                                confirmingReset = false
+                                            Task {
+                                                if await appModel.resetHistory() {
+                                                    showingResetSuccess = true
+                                                } else {
+                                                    confirmingReset = false
+                                                }
                                             }
                                         }
                                         .buttonStyle(.borderedProminent)

@@ -146,8 +146,10 @@ final class AppModel {
     @ObservationIgnored private let cleanupMetricsStore: CleanupMetricsStore
     @ObservationIgnored private var hasStarted = false
     @ObservationIgnored private var bucketLocations: [String: ResolvedLocation] = [:]
+    @ObservationIgnored private var bucketLocationLocaleIdentifier = Locale.current.identifier
     @ObservationIgnored private var locationResolutionTask: Task<Void, Never>?
     @ObservationIgnored private var libraryReloadGeneration = 0
+    @ObservationIgnored private var groupBuildGeneration = 0
 
     init(
         photoLibrary: any PhotoLibraryClient,
@@ -305,7 +307,8 @@ final class AppModel {
             assets = fetchedAssets
             assetIndex = Dictionary(uniqueKeysWithValues: fetchedAssets.map { ($0.id, $0) })
             try refreshDecisionCache()
-            try recoverDeletingSessionIfPossible()
+            try await recoverDeletingSessionIfPossible()
+            guard generation == libraryReloadGeneration, permission.canRead else { return }
             try reconcileSessionState(purgeMissingDecisions: permission == .full)
             try refreshDecisionCache()
             try loadCachedLocations()
@@ -315,7 +318,7 @@ final class AppModel {
             if let session = activeSession,
                session.status == .swiping,
                session.cursor >= session.orderedAssetIDs.count {
-                finishSwiping()
+                await finishSwiping()
             }
         } catch {
             if generation == libraryReloadGeneration { errorMessage = error.localizedDescription }
@@ -379,7 +382,7 @@ final class AppModel {
         preheatAroundCurrentAsset()
     }
 
-    func discardActiveSession() {
+    func discardActiveSession() async {
         guard let session = activeSession else { return }
         do {
             try repository.discard(session: session)
@@ -387,14 +390,14 @@ final class AppModel {
             activeSession = nil
             actions = []
             selectedGroupIDs.removeAll()
-            try rebuildGroups()
             route = .dashboard
+            try await rebuildGroupsOffMain()
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    func decide(_ decision: AssetDecision) {
+    func decide(_ decision: AssetDecision) async {
         guard let session = activeSession,
               session.status == .swiping,
               session.cursor < session.orderedAssetIDs.count else { return }
@@ -408,7 +411,7 @@ final class AppModel {
             actions.removeAll { $0.sequence >= sequence }
             actions.append(action)
             if session.cursor == session.orderedAssetIDs.count {
-                finishSwiping()
+                await finishSwiping()
             } else {
                 preheatAroundCurrentAsset()
             }
@@ -434,7 +437,7 @@ final class AppModel {
         }
     }
 
-    func redo() {
+    func redo() async {
         guard let session = activeSession, session.status == .swiping,
               let action = actions.first(where: { $0.sequence == session.cursor && !$0.isApplied }) else { return }
         do {
@@ -445,7 +448,7 @@ final class AppModel {
             try repository.save()
             actions = try repository.actions(for: session.identifier)
             if session.cursor == session.orderedAssetIDs.count {
-                finishSwiping()
+                await finishSwiping()
             } else {
                 preheatAroundCurrentAsset()
             }
@@ -472,14 +475,14 @@ final class AppModel {
         }
     }
 
-    func finishCurrentSession() {
+    func finishCurrentSession() async {
         guard let session = activeSession,
               session.status == .swiping,
               deleteCount == 0 else { return }
 
         let fullyReviewed = sessionRemaining == 0
         do {
-            try finalizeSession(session, markGroupsCompleted: fullyReviewed)
+            try await finalizeSession(session, markGroupsCompleted: fullyReviewed)
             lastCleanupSummary = cleanupMetricsStore.summary(for: session.identifier)
             route = fullyReviewed ? .completion : .dashboard
         } catch {
@@ -594,7 +597,7 @@ final class AppModel {
                 try repository.removeDecisions(for: Set(selected))
                 try refreshDecisionCache()
             }
-            try finalizeSession(session, markGroupsCompleted: fullyReviewed)
+            try await finalizeSession(session, markGroupsCompleted: fullyReviewed)
             await reloadLibrary()
             if fullyReviewed {
                 lastCleanupSummary = cleanupMetricsStore.summary(for: session.identifier)
@@ -610,7 +613,7 @@ final class AppModel {
                 assets.removeAll { deleted.contains($0.id) }
                 assetIndex = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
                 selectedGroupIDs.removeAll()
-                try? rebuildGroups()
+                try? await rebuildGroupsOffMain()
                 route = .dashboard
                 errorMessage = String(localized: "\(selected.count) items were deleted from Photos, but Roll Slash could not finish updating its cleanup history. Reopen the app to reconcile the library. \(error.localizedDescription)")
             }
@@ -631,7 +634,7 @@ final class AppModel {
     }
 
     @discardableResult
-    func resetHistory() -> Bool {
+    func resetHistory() async -> Bool {
         guard activeSession?.status != .deleting else {
             errorMessage = String(localized: "Cleanup history cannot be reset while a deletion is being reconciled.")
             return false
@@ -645,7 +648,7 @@ final class AppModel {
             activeSession = nil
             actions = []
             selectedGroupIDs.removeAll()
-            try rebuildGroups()
+            try await rebuildGroupsOffMain()
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -653,12 +656,12 @@ final class AppModel {
         }
     }
 
-    private func finishSwiping() {
+    private func finishSwiping() async {
         guard let session = activeSession else { return }
         let candidates = actions.filter { $0.isApplied && $0.decision == .deletePending }.map(\.assetIdentifier)
         if candidates.isEmpty {
             do {
-                try finalizeSession(session)
+                try await finalizeSession(session)
                 lastCleanupSummary = cleanupMetricsStore.summary(for: session.identifier)
                 route = .completion
             } catch {
@@ -669,7 +672,7 @@ final class AppModel {
         }
     }
 
-    private func finalizeSession(_ session: CleanupSessionRecord, markGroupsCompleted: Bool = true) throws {
+    private func finalizeSession(_ session: CleanupSessionRecord, markGroupsCompleted: Bool = true) async throws {
         let allGroups = monthGroups + locationGroups
         if markGroupsCompleted {
             for key in session.selectedGroupKeys {
@@ -686,7 +689,7 @@ final class AppModel {
         // review deletion.
         selectedGroupIDs.removeAll()
         do {
-            try rebuildGroups()
+            try await rebuildGroupsOffMain()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -696,19 +699,9 @@ final class AppModel {
         decisionsByAssetID = try repository.allDecisions()
     }
 
-    private func rebuildGroups() throws {
-        let completions = try completionSnapshots()
-        let result = Self.buildGroups(
-            assets: assets,
-            decisions: decisionsByAssetID,
-            completions: completions,
-            bucketLocations: bucketLocations
-        )
-        monthGroups = result.month
-        locationGroups = result.location
-    }
-
     private func rebuildGroupsOffMain(expectedReloadGeneration: Int? = nil) async throws {
+        groupBuildGeneration += 1
+        let generation = groupBuildGeneration
         let completions = try completionSnapshots()
         let assets = assets
         let decisions = decisionsByAssetID
@@ -722,6 +715,7 @@ final class AppModel {
             )
         }.value
         guard !Task.isCancelled,
+              generation == groupBuildGeneration,
               expectedReloadGeneration == nil || expectedReloadGeneration == libraryReloadGeneration,
               permission.canRead else { return }
         monthGroups = result.month
@@ -874,12 +868,17 @@ final class AppModel {
     }
 
     private func loadCachedLocations() throws {
-        let buckets = Set(assets.compactMap(\.coordinate).map(LocationBucketing.key))
-        for bucket in buckets.subtracting(bucketLocations.keys) {
-            if let location = try repository.cachedLocation(for: bucket) {
-                bucketLocations[bucket] = location
-            }
+        let localeIdentifier = Locale.current.identifier
+        if bucketLocationLocaleIdentifier != localeIdentifier {
+            bucketLocations.removeAll()
+            bucketLocationLocaleIdentifier = localeIdentifier
         }
+        let buckets = Set(assets.compactMap(\.coordinate).map(LocationBucketing.key))
+        let missing = buckets.subtracting(bucketLocations.keys)
+        bucketLocations.merge(
+            try repository.cachedLocations(for: missing, localeIdentifier: localeIdentifier),
+            uniquingKeysWith: { _, latest in latest }
+        )
     }
 
     nonisolated private static func itemCountText(_ count: Int) -> String {
@@ -980,7 +979,7 @@ final class AppModel {
         actions = try repository.actions(for: session.identifier)
     }
 
-    private func recoverDeletingSessionIfPossible() throws {
+    private func recoverDeletingSessionIfPossible() async throws {
         guard permission == .full,
               let session = activeSession,
               session.status == .deleting else { return }
@@ -997,7 +996,7 @@ final class AppModel {
         }
 
         if stillPresent.isEmpty {
-            try finalizeSession(session, markGroupsCompleted: fullyReviewed)
+            try await finalizeSession(session, markGroupsCompleted: fullyReviewed)
             if fullyReviewed {
                 lastCleanupSummary = cleanupMetricsStore.summary(for: session.identifier)
             }

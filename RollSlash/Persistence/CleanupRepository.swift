@@ -7,14 +7,11 @@ protocol CleanupRepository: AnyObject {
     func decision(for assetIdentifier: String) throws -> AssetDecision?
     func setDecision(_ decision: AssetDecision, for assetIdentifier: String, sessionIdentifier: UUID?) throws
     func restoreOriginalDecision(for assetIdentifier: String, in session: CleanupSessionRecord) throws
-    func removeDecision(for assetIdentifier: String) throws
     func removeDecisions(for assetIdentifiers: Set<String>) throws
     func activeSession() throws -> CleanupSessionRecord?
     func createSession(groupKind: GroupKind, selectedGroupKeys: [String], orderedAssetIDs: [String]) throws -> CleanupSessionRecord
     func actions(for sessionIdentifier: UUID) throws -> [CleanupActionRecord]
     func recordDecision(session: CleanupSessionRecord, assetIdentifier: String, decision: AssetDecision) throws -> CleanupActionRecord
-    func appendAction(sessionIdentifier: UUID, sequence: Int, assetIdentifier: String, decision: AssetDecision) throws
-    func trimActions(sessionIdentifier: UUID, from sequence: Int) throws
     func replaceActions(sessionIdentifier: UUID, actions: [CleanupActionSnapshot]) throws
     func updateReviewSelection(session: CleanupSessionRecord, candidateIDs: [String], selectedIDs: Set<String>) throws
     func updateReviewSelection(session: CleanupSessionRecord, assetIdentifier: String, isSelected: Bool) throws
@@ -23,7 +20,7 @@ protocol CleanupRepository: AnyObject {
     func finish(session: CleanupSessionRecord) throws
     func completedGroups() throws -> [String: GroupCompletionRecord]
     func markCompleted(groupKey: String, label: String) throws
-    func cachedLocation(for bucketKey: String) throws -> ResolvedLocation?
+    func cachedLocations(for bucketKeys: Set<String>, localeIdentifier: String) throws -> [String: ResolvedLocation]
     func cacheLocation(_ location: ResolvedLocation, for bucketKey: String) throws
     func resetHistory() throws
 }
@@ -85,12 +82,6 @@ final class SwiftDataCleanupRepository: CleanupRepository {
         try context.save()
     }
 
-    func removeDecision(for assetIdentifier: String) throws {
-        let descriptor = FetchDescriptor<AssetDecisionRecord>(predicate: #Predicate { $0.assetIdentifier == assetIdentifier })
-        try context.fetch(descriptor).forEach(context.delete)
-        try context.save()
-    }
-
     func removeDecisions(for assetIdentifiers: Set<String>) throws {
         let records = try context.fetch(FetchDescriptor<AssetDecisionRecord>())
         records.filter { assetIdentifiers.contains($0.assetIdentifier) }.forEach(context.delete)
@@ -140,24 +131,6 @@ final class SwiftDataCleanupRepository: CleanupRepository {
         session.cursor += 1
         try context.save()
         return action
-    }
-
-    func appendAction(sessionIdentifier: UUID, sequence: Int, assetIdentifier: String, decision: AssetDecision) throws {
-        context.insert(CleanupActionRecord(
-            sessionIdentifier: sessionIdentifier,
-            sequence: sequence,
-            assetIdentifier: assetIdentifier,
-            decision: decision
-        ))
-        try context.save()
-    }
-
-    func trimActions(sessionIdentifier: UUID, from sequence: Int) throws {
-        let descriptor = FetchDescriptor<CleanupActionRecord>(predicate: #Predicate {
-            $0.sessionIdentifier == sessionIdentifier && $0.sequence >= sequence
-        })
-        try context.fetch(descriptor).forEach(context.delete)
-        try context.save()
     }
 
     func replaceActions(sessionIdentifier: UUID, actions: [CleanupActionSnapshot]) throws {
@@ -260,10 +233,13 @@ final class SwiftDataCleanupRepository: CleanupRepository {
         try context.save()
     }
 
-    func cachedLocation(for bucketKey: String) throws -> ResolvedLocation? {
-        var descriptor = FetchDescriptor<LocationCacheRecord>(predicate: #Predicate { $0.bucketKey == bucketKey })
-        descriptor.fetchLimit = 1
-        return try context.fetch(descriptor).first?.location
+    func cachedLocations(for bucketKeys: Set<String>, localeIdentifier: String) throws -> [String: ResolvedLocation] {
+        guard !bucketKeys.isEmpty else { return [:] }
+        let records = try context.fetch(FetchDescriptor<LocationCacheRecord>())
+        return Dictionary(uniqueKeysWithValues: records.compactMap { record in
+            guard bucketKeys.contains(record.bucketKey), record.localeIdentifier == localeIdentifier else { return nil }
+            return (record.bucketKey, record.location)
+        })
     }
 
     func cacheLocation(_ location: ResolvedLocation, for bucketKey: String) throws {

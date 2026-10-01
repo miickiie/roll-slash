@@ -11,6 +11,7 @@ struct MediaViewer: View {
     @Environment(\.dismiss) private var dismiss
 
     let asset: PhotoAssetDescriptor
+    var initialImage: UIImage? = nil
     var onSwipeLeft: (() -> Void)? = nil
     var onSwipeRight: (() -> Void)? = nil
     var onDismissSwipe: ((CGSize) -> Void)? = nil
@@ -19,6 +20,7 @@ struct MediaViewer: View {
     var dismissalOpacity: Double = 1
 
     @State private var image: UIImage?
+    @State private var hasDetailedImage = false
     @State private var livePhoto: PHLivePhoto?
     @State private var player: AVPlayer?
     @State private var isLivePlaying = false
@@ -29,6 +31,10 @@ struct MediaViewer: View {
     @State private var isUpdatingFavorite = false
     @State private var favoriteTask: Task<Void, Never>?
     @State private var showingShareSheet = false
+    @State private var shareURL: URL?
+    @State private var shareTask: Task<Void, Never>?
+    @State private var isPreparingShare = false
+    @State private var shareErrorMessage: String?
     @State private var favoriteErrorMessage: String?
 
     var body: some View {
@@ -61,10 +67,19 @@ struct MediaViewer: View {
         .onDisappear {
             favoriteTask?.cancel()
             favoriteTask = nil
+            shareTask?.cancel()
+            shareTask = nil
             player?.pause()
         }
-        .sheet(isPresented: $showingShareSheet) {
-            if let image {
+        .onChange(of: asset.id) { _, _ in
+            shareTask?.cancel()
+            shareTask = nil
+            isPreparingShare = false
+        }
+        .sheet(isPresented: $showingShareSheet, onDismiss: cleanUpSharedVideo) {
+            if let shareURL {
+                ShareSheet(items: [shareURL])
+            } else if let image {
                 ShareSheet(items: [image])
             }
         }
@@ -75,6 +90,14 @@ struct MediaViewer: View {
             Button("OK", role: .cancel) { favoriteErrorMessage = nil }
         } message: {
             Text(favoriteErrorMessage ?? "")
+        }
+        .alert("Share unavailable", isPresented: Binding(
+            get: { shareErrorMessage != nil },
+            set: { if !$0 { shareErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { shareErrorMessage = nil }
+        } message: {
+            Text(shareErrorMessage ?? "")
         }
         .simultaneousGesture(
             DragGesture(minimumDistance: 24)
@@ -166,17 +189,23 @@ struct MediaViewer: View {
                 .accessibilityIdentifier("favorite-media")
                 .accessibilityLabel(isFavorite ? "Remove from Favorites" : "Add to Favorites")
             }
-            if image != nil {
-                Button("Share", systemImage: "square.and.arrow.up") {
-                    showingShareSheet = true
+            if (image != nil && hasDetailedImage) || asset.mediaKind == .video {
+                Button(action: share) {
+                    if isPreparingShare {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: "square.and.arrow.up")
+                    }
                 }
-                .labelStyle(.iconOnly)
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(.white)
                 .padding(12)
                 .background(.black.opacity(0.55), in: .circle)
+                .disabled(isPreparingShare)
                 .accessibilityIdentifier("share-media")
-                .accessibilityLabel("Share photo")
+                .accessibilityLabel(isPreparingShare
+                    ? "Preparing video for sharing"
+                    : (asset.mediaKind == .video ? "Share video" : "Share photo"))
             }
             if asset.mediaKind == .video {
                 Button(isMuted ? "Unmute" : "Mute", systemImage: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") {
@@ -209,21 +238,28 @@ struct MediaViewer: View {
     private func load() async {
         player?.pause()
         player = nil
-        image = nil
+        image = initialImage
+        hasDetailedImage = false
         livePhoto = nil
         isLivePlaying = false
         zoomScale = 1
         failed = false
+        isFavorite = false
         favoriteErrorMessage = nil
+        shareErrorMessage = nil
         let target = CGSize(width: 1600, height: 2200)
-        image = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active)
-        guard !Task.isCancelled else { return }
-        isFavorite = await appModel.isFavorite(asset.id)
-
         switch asset.mediaKind {
         case .photo:
-            break
+            if let detailedImage = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active) {
+                image = detailedImage
+                hasDetailedImage = true
+            }
         case .livePhoto:
+            if let detailedImage = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active) {
+                image = detailedImage
+                hasDetailedImage = true
+            }
+            guard !Task.isCancelled else { return }
             livePhoto = await appModel.previewProvider.livePhoto(for: asset.id, targetSize: target)
         case .video:
             if let item = await appModel.previewProvider.playerItem(for: asset.id) {
@@ -233,7 +269,13 @@ struct MediaViewer: View {
                 player = newPlayer
                 newPlayer.play()
             }
+            if let detailedImage = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active) {
+                image = detailedImage
+                hasDetailedImage = true
+            }
         }
+        guard !Task.isCancelled else { return }
+        isFavorite = await appModel.isFavorite(asset.id)
         failed = image == nil && livePhoto == nil && player == nil
     }
 
@@ -254,6 +296,39 @@ struct MediaViewer: View {
                 favoriteErrorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func share() {
+        guard asset.mediaKind == .video else {
+            if image != nil { showingShareSheet = true }
+            return
+        }
+        guard !isPreparingShare else { return }
+        isPreparingShare = true
+        shareTask = Task { @MainActor in
+            defer { isPreparingShare = false }
+            do {
+                guard let url = try await appModel.previewProvider.shareableVideoURL(for: asset.id) else {
+                    shareErrorMessage = String(localized: "This video is no longer available for sharing.")
+                    return
+                }
+                guard !Task.isCancelled else {
+                    try? FileManager.default.removeItem(at: url)
+                    return
+                }
+                shareURL = url
+                showingShareSheet = true
+            } catch is CancellationError {
+                return
+            } catch {
+                shareErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func cleanUpSharedVideo() {
+        if let shareURL { try? FileManager.default.removeItem(at: shareURL) }
+        shareURL = nil
     }
 
     private func handleNavigationSwipe(_ value: DragGesture.Value) {

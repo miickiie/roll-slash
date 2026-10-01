@@ -377,7 +377,7 @@ private struct ResumeBanner: View {
                 } confirm: {
                     Button("Discard Session", role: .destructive) {
                         showingDiscardConfirmation = false
-                        appModel.discardActiveSession()
+                            Task { await appModel.discardActiveSession() }
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(RollSlashTheme.coral)

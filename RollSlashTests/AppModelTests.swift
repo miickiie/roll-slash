@@ -18,15 +18,15 @@ struct AppModelTests {
         harness.model.beginSelectedCleanup()
 
         #expect(harness.model.sessionTotal == 2)
-        harness.model.decide(.keep)
+        await harness.model.decide(.keep)
         #expect(harness.model.keptCount == 1)
         harness.model.undo()
         #expect(harness.model.keptCount == 0)
         #expect(harness.model.canRedo)
-        harness.model.redo()
+        await harness.model.redo()
         #expect(harness.model.keptCount == 1)
         harness.model.undo()
-        harness.model.decide(.deletePending)
+        await harness.model.decide(.deletePending)
         #expect(!harness.model.canRedo)
         #expect(harness.model.deleteCount == 1)
     }
@@ -40,9 +40,9 @@ struct AppModelTests {
         harness.model.beginSelectedCleanup()
 
         let keptID = try #require(harness.model.currentAsset?.id)
-        harness.model.decide(.keep)
+        await harness.model.decide(.keep)
         #expect(harness.model.sessionRemaining == 1)
-        harness.model.finishCurrentSession()
+        await harness.model.finishCurrentSession()
 
         #expect(harness.model.route == .dashboard)
         #expect(harness.model.activeSession == nil)
@@ -61,8 +61,8 @@ struct AppModelTests {
         let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
         harness.model.toggleSelection(january)
         harness.model.beginSelectedCleanup()
-        harness.model.decide(.keep)
-        harness.model.decide(.keep)
+        await harness.model.decide(.keep)
+        await harness.model.decide(.keep)
 
         #expect(harness.model.route == .completion)
         let noLocation = try #require(harness.model.locationGroups.first { $0.key.value == "no-location" })
@@ -77,7 +77,7 @@ struct AppModelTests {
         let february = try #require(harness.model.monthGroups.first { $0.key.value == "2026-02" })
         harness.model.toggleSelection(february)
         harness.model.beginSelectedCleanup()
-        harness.model.decide(.deletePending)
+        await harness.model.decide(.deletePending)
 
         #expect(harness.model.route == .review)
         await harness.model.commitDeletion()
@@ -100,7 +100,7 @@ struct AppModelTests {
         let february = try #require(harness.model.monthGroups.first { $0.key.value == "2026-02" })
         harness.model.toggleSelection(february)
         harness.model.beginSelectedCleanup()
-        harness.model.decide(.deletePending)
+        await harness.model.decide(.deletePending)
         let session = try #require(harness.model.activeSession)
         session.status = .deleting
         harness.client.assets.removeAll { $0.id == "feb" }
@@ -118,7 +118,7 @@ struct AppModelTests {
         let february = try #require(harness.model.monthGroups.first { $0.key.value == "2026-02" })
         harness.model.toggleSelection(february)
         harness.model.beginSelectedCleanup()
-        harness.model.decide(.deletePending)
+        await harness.model.decide(.deletePending)
 
         #expect(harness.model.reviewSelectedIDs == ["feb"])
         harness.model.keepAllFromReview()
@@ -210,7 +210,7 @@ struct AppModelTests {
         let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
         harness.model.toggleSelection(january)
         harness.model.beginSelectedCleanup()
-        harness.model.decide(.keep)
+        await harness.model.decide(.keep)
 
         harness.client.permission = .limited
         harness.client.assets = originalAssets.filter { $0.id == "feb" }
@@ -230,8 +230,8 @@ struct AppModelTests {
         let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
         harness.model.toggleSelection(january)
         harness.model.beginSelectedCleanup()
-        harness.model.decide(.keep)
-        harness.model.decide(.keep)
+        await harness.model.decide(.keep)
+        await harness.model.decide(.keep)
         #expect(harness.model.monthGroups.first { $0.key.value == "2026-01" }?.isCleaned == true)
 
         let calendar = Calendar(identifier: .gregorian)
@@ -254,8 +254,8 @@ struct AppModelTests {
         let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
         harness.model.toggleSelection(january)
         harness.model.beginSelectedCleanup()
-        harness.model.decide(.keep)
-        harness.model.decide(.keep)
+        await harness.model.decide(.keep)
+        await harness.model.decide(.keep)
         harness.model.finishCompletion()
 
         let cleanedJanuary = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
@@ -274,8 +274,8 @@ struct AppModelTests {
         let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
         harness.model.toggleSelection(january)
         harness.model.beginSelectedCleanup()
-        harness.model.decide(.keep)
-        harness.model.decide(.keep)
+        await harness.model.decide(.keep)
+        await harness.model.decide(.keep)
         harness.model.finishCompletion()
 
         let cleanedJanuary = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
@@ -295,22 +295,22 @@ struct AppModelTests {
         let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
         harness.model.toggleSelection(january)
         harness.model.beginSelectedCleanup()
-        harness.model.decide(.keep)
-        harness.model.decide(.keep)
+        await harness.model.decide(.keep)
+        await harness.model.decide(.keep)
         harness.model.finishCompletion()
 
         let cleanedJanuary = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
         harness.model.toggleSelection(cleanedJanuary)
         harness.model.beginSelectedCleanup()
-        harness.model.decide(.deletePending)
+        await harness.model.decide(.deletePending)
 
         let repository = SwiftDataCleanupRepository(container: harness.container)
         #expect(try repository.decision(for: "jan-new") == .deletePending)
         harness.model.undo()
         #expect(try repository.decision(for: "jan-new") == .keep)
-        harness.model.redo()
+        await harness.model.redo()
         #expect(try repository.decision(for: "jan-new") == .deletePending)
-        harness.model.discardActiveSession()
+        await harness.model.discardActiveSession()
         #expect(try repository.decision(for: "jan-new") == .keep)
         #expect(try repository.decision(for: "jan-old") == .keep)
     }
@@ -323,14 +323,14 @@ struct AppModelTests {
         let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
         harness.model.toggleSelection(january)
         harness.model.beginSelectedCleanup()
-        harness.model.decide(.keep)
-        harness.model.decide(.keep)
+        await harness.model.decide(.keep)
+        await harness.model.decide(.keep)
         harness.model.finishCompletion()
 
         let cleanedJanuary = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
         harness.model.toggleSelection(cleanedJanuary)
         harness.model.beginSelectedCleanup()
-        harness.model.decide(.deletePending)
+        await harness.model.decide(.deletePending)
 
         let relaunchedModel = AppModel(
             photoLibrary: harness.client,
@@ -340,7 +340,7 @@ struct AppModelTests {
         )
         await relaunchedModel.start()
         #expect(relaunchedModel.activeSession != nil)
-        relaunchedModel.discardActiveSession()
+        await relaunchedModel.discardActiveSession()
 
         let repository = SwiftDataCleanupRepository(container: harness.container)
         #expect(try repository.decision(for: "jan-new") == .keep)
@@ -355,7 +355,7 @@ struct AppModelTests {
         let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
         harness.model.toggleSelection(january)
         harness.model.beginSelectedCleanup()
-        harness.model.decide(.deletePending)
+        await harness.model.decide(.deletePending)
         #expect(harness.model.reviewCandidateIDs == ["jan-new"])
 
         harness.model.reviewCurrentBatch()
@@ -385,7 +385,7 @@ struct AppModelTests {
         let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
         harness.model.toggleSelection(january)
         harness.model.beginSelectedCleanup()
-        harness.model.decide(.deletePending)
+        await harness.model.decide(.deletePending)
         harness.model.reviewCurrentBatch()
         harness.client.deletionResultOverride = []
 
@@ -514,6 +514,7 @@ private final class TestPreviewProvider: MediaPreviewProvider {
     func image(for identifier: String, targetSize: CGSize, kind: PreviewRequestKind) async -> UIImage? { nil }
     func livePhoto(for identifier: String, targetSize: CGSize) async -> PHLivePhoto? { nil }
     func playerItem(for identifier: String) async -> AVPlayerItem? { nil }
+    func shareableVideoURL(for identifier: String) async throws -> URL? { nil }
     func startCaching(identifiers: [String], targetSize: CGSize) {}
     func stopCachingAll() {}
 }

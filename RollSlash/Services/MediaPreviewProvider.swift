@@ -13,6 +13,7 @@ protocol MediaPreviewProvider: AnyObject {
     func image(for identifier: String, targetSize: CGSize, kind: PreviewRequestKind) async -> UIImage?
     func livePhoto(for identifier: String, targetSize: CGSize) async -> PHLivePhoto?
     func playerItem(for identifier: String) async -> AVPlayerItem?
+    func shareableVideoURL(for identifier: String) async throws -> URL?
     func startCaching(identifiers: [String], targetSize: CGSize)
     func stopCachingAll()
 }
@@ -79,6 +80,39 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
         }
         for await item in stream { return item }
         return nil
+    }
+
+    func shareableVideoURL(for identifier: String) async throws -> URL? {
+        guard let asset = asset(for: identifier) else { return nil }
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard let resource = resources.first(where: { $0.type == .fullSizeVideo })
+            ?? resources.first(where: { $0.type == .video }) else { return nil }
+
+        let fileExtension = URL(fileURLWithPath: resource.originalFilename).pathExtension
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension(fileExtension.isEmpty ? "mov" : fileExtension)
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true
+        do {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                PHAssetResourceManager.default().writeData(
+                    for: resource, toFile: destination, options: options
+                ) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                }
+            }
+            try Task.checkCancellation()
+            return destination
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
     }
 
     func startCaching(identifiers: [String], targetSize: CGSize) {

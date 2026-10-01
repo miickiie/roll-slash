@@ -14,8 +14,7 @@ struct RepositoryTests {
             selectedGroupKeys: ["month:2026-01"],
             orderedAssetIDs: ["a", "b"]
         )
-        try repository.appendAction(sessionIdentifier: session.identifier, sequence: 0, assetIdentifier: "a", decision: .keep)
-        try repository.setDecision(.keep, for: "a", sessionIdentifier: session.identifier)
+        _ = try repository.recordDecision(session: session, assetIdentifier: "a", decision: .keep)
 
         #expect(try repository.activeSession()?.identifier == session.identifier)
         #expect(try repository.decision(for: "a") == .keep)
@@ -79,6 +78,23 @@ struct RepositoryTests {
         #expect(try repository.decision(for: "a") == .keep)
         #expect(try repository.decision(for: "b") == .deletePending)
         #expect(session.reviewSelectedIDs == ["b"])
+    }
+
+    @Test("location cache reads only requested buckets in the current locale")
+    func locationCacheBatchAndLocale() throws {
+        let repository = SwiftDataCleanupRepository(container: try makeContainer())
+        let first = ResolvedLocation(city: "Bangkok", country: "Thailand")
+        let second = ResolvedLocation(city: "Chiang Mai", country: "Thailand")
+        try repository.cacheLocation(first, for: "first")
+        try repository.cacheLocation(second, for: "second")
+
+        let current = try repository.cachedLocations(
+            for: ["first"], localeIdentifier: Locale.current.identifier
+        )
+        #expect(current == ["first": first])
+        #expect(try repository.cachedLocations(
+            for: ["first", "second"], localeIdentifier: "different-locale"
+        ).isEmpty)
     }
 
     private func makeContainer() throws -> ModelContainer {
