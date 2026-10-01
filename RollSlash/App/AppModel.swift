@@ -101,12 +101,27 @@ private struct GroupBuildResult: Sendable {
 @MainActor
 @Observable
 final class AppModel {
-    var route: AppRoute = .onboarding
+    var route: AppRoute = .onboarding {
+        didSet {
+            guard route != oldValue else { return }
+            if route == .dashboard, grouping == .location, !assets.isEmpty {
+                resolveMissingLocations()
+            } else if route != .dashboard {
+                locationResolutionTask?.cancel()
+                locationResolutionTask = nil
+            }
+        }
+    }
     var permission: PhotoPermission = .notDetermined
     var grouping: GroupKind = .month {
         didSet {
             selectedGroupIDs.removeAll()
-            if grouping == .location { resolveMissingLocations() }
+            if grouping == .location {
+                resolveMissingLocations()
+            } else {
+                locationResolutionTask?.cancel()
+                locationResolutionTask = nil
+            }
         }
     }
     var monthGroups: [MediaGroup] = []
@@ -452,6 +467,21 @@ final class AppModel {
             session.status = .reviewing
             try repository.save()
             route = .review
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func finishCurrentSession() {
+        guard let session = activeSession,
+              session.status == .swiping,
+              deleteCount == 0 else { return }
+
+        let fullyReviewed = sessionRemaining == 0
+        do {
+            try finalizeSession(session, markGroupsCompleted: fullyReviewed)
+            lastCleanupSummary = cleanupMetricsStore.summary(for: session.identifier)
+            route = fullyReviewed ? .completion : .dashboard
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -857,32 +887,41 @@ final class AppModel {
     }
 
     private func resolveMissingLocations() {
-        guard grouping == .location else { return }
+        guard grouping == .location, route == .dashboard, permission.canRead else { return }
         locationResolutionTask?.cancel()
         let buckets = Dictionary(grouping: assets.compactMap { asset -> (String, GeoCoordinate)? in
             guard let coordinate = asset.coordinate else { return nil }
             return (LocationBucketing.key(for: coordinate), coordinate)
         }, by: { $0.0 })
-        let missing = buckets.keys.filter { bucketLocations[$0] == nil }.sorted()
+        let missing = buckets.keys.filter { bucketLocations[$0] == nil }.sorted { lhs, rhs in
+            let lhsCount = buckets[lhs]?.count ?? 0
+            let rhsCount = buckets[rhs]?.count ?? 0
+            return lhsCount == rhsCount ? lhs < rhs : lhsCount > rhsCount
+        }
         locationResolutionTask = Task { [weak self] in
             guard let self else { return }
-            for batchStart in stride(from: 0, to: missing.count, by: 60) {
-                var changed = false
-                let batchEnd = min(batchStart + 60, missing.count)
-                for bucket in missing[batchStart..<batchEnd] {
-                    guard !Task.isCancelled, let coordinate = buckets[bucket]?.first?.1 else { return }
-                    do {
-                        let location = try await locationResolver.resolve(coordinate)
-                            ?? ResolvedLocation(city: nil, country: nil)
-                        bucketLocations[bucket] = location
-                        try repository.cacheLocation(location, for: bucket)
-                        changed = true
-                    } catch {
-                        // Leave transient failures uncached so a later refresh can retry them.
+            var resolvedCount = 0
+            for bucket in missing {
+                guard !Task.isCancelled, grouping == .location, route == .dashboard,
+                      let coordinate = buckets[bucket]?.first?.1 else { return }
+                do {
+                    let location = try await locationResolver.resolve(coordinate)
+                        ?? ResolvedLocation(city: nil, country: nil)
+                    guard !Task.isCancelled, grouping == .location, route == .dashboard else { return }
+                    try repository.cacheLocation(location, for: bucket)
+                    bucketLocations[bucket] = location
+                    resolvedCount += 1
+                    if resolvedCount == 1 || resolvedCount.isMultiple(of: 8) {
+                        try? await rebuildGroupsOffMain()
                     }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // Leave transient failures uncached so a later refresh can retry them.
                 }
-                if changed { try? await rebuildGroupsOffMain() }
-                await Task.yield()
+            }
+            if resolvedCount > 1 && !resolvedCount.isMultiple(of: 8) {
+                try? await rebuildGroupsOffMain()
             }
         }
     }

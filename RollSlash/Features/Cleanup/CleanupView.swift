@@ -124,14 +124,20 @@ struct CleanupView: View {
                     .foregroundStyle(.white.opacity(0.7))
             }
             Spacer()
-            Button("Review deletes now", systemImage: "checkmark.seal") {
-                showingReviewNowConfirmation = true
+            Button(appModel.deleteCount > 0 ? "Review deletes now" : "Finish session", systemImage: "checkmark.seal") {
+                if appModel.deleteCount > 0 {
+                    showingReviewNowConfirmation = true
+                } else {
+                    appModel.finishCurrentSession()
+                }
             }
             .labelStyle(.iconOnly)
             .buttonStyle(.glass)
-            .disabled(appModel.deleteCount == 0 || isDecisionLocked)
-            .accessibilityIdentifier("review-now")
-            .accessibilityHint("Review items currently marked for deletion now, while leaving unswiped items for later.")
+            .disabled(isDecisionLocked)
+            .accessibilityIdentifier(appModel.deleteCount > 0 ? "review-now" : "finish-session")
+            .accessibilityHint(appModel.deleteCount > 0
+                ? "Review items marked for deletion now. Unswiped items stay for later."
+                : "Finish this session. Unswiped items stay available for later.")
             .fullScreenCover(
                 isPresented: $showingReviewNowConfirmation,
                 onDismiss: {

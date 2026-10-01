@@ -21,6 +21,32 @@ final class RollSlashUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Freshly slashed"].waitForExistence(timeout: 3))
     }
 
+    func testFinishPartialKeepOnlySession() {
+        let app = XCUIApplication()
+        app.launchArguments.append("--ui-testing")
+        app.launch()
+
+        for month in ["2026-08", "2026-07"] {
+            let group = app.buttons["group-row-month:\(month)"]
+            XCTAssertTrue(group.waitForExistence(timeout: 5))
+            group.tap()
+        }
+        app.buttons["clean-selected"].tap()
+        let keep = app.buttons["decision-keep"]
+        XCTAssertTrue(keep.waitForExistence(timeout: 3))
+        keep.tap()
+        XCTAssertTrue(app.staticTexts["1 left"].waitForExistence(timeout: 3))
+
+        let finish = app.buttons["finish-session"]
+        XCTAssertTrue(waitUntilEnabled(finish))
+        XCTAssertTrue(finish.isHittable)
+        finish.tap()
+        XCTAssertTrue(app.staticTexts.matching(identifier: "dashboard-title").firstMatch.waitForExistence(timeout: 3))
+        let unfinishedGroup = app.buttons["group-row-month:2026-07"]
+        XCTAssertTrue(unfinishedGroup.waitForExistence(timeout: 3))
+        XCTAssertEqual(unfinishedGroup.value as? String, "1 left to review")
+    }
+
     func testDeletionReviewFlowCompletes() {
         let app = XCUIApplication()
         app.launchArguments.append("--ui-testing")

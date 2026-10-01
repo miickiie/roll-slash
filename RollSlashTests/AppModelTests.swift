@@ -31,6 +31,29 @@ struct AppModelTests {
         #expect(harness.model.deleteCount == 1)
     }
 
+    @Test("finishing a partial keep-only session preserves undecided items")
+    func finishPartialKeepOnlySession() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+
+        let keptID = try #require(harness.model.currentAsset?.id)
+        harness.model.decide(.keep)
+        #expect(harness.model.sessionRemaining == 1)
+        harness.model.finishCurrentSession()
+
+        #expect(harness.model.route == .dashboard)
+        #expect(harness.model.activeSession == nil)
+        let unfinishedJanuary = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        #expect(unfinishedJanuary.unresolvedCount == 1)
+        harness.model.toggleSelection(unfinishedJanuary)
+        harness.model.beginSelectedCleanup()
+        #expect(harness.model.sessionTotal == 1)
+        #expect(harness.model.currentAsset?.id != keptID)
+    }
+
     @Test("review decisions are global across grouping modes")
     func globalDecisions() async throws {
         let harness = try makeHarness()
