@@ -176,7 +176,10 @@ private struct ReviewMediaViewer: View {
                     .background(.black)
             }
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("review-media-viewer")
+        .preferredColorScheme(.dark)
+        .visibleSystemStatusBar()
         .onAppear { reconcileCurrentAsset() }
         .onChange(of: appModel.reviewCandidateIDs) { _, _ in
             reconcileCurrentAsset()

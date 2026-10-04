@@ -4,6 +4,7 @@ enum AppRoute: Hashable {
     case onboarding
     case dashboard
     case cleanup
+    case similarComparison
     case review
     case completion
 }
@@ -37,16 +38,43 @@ struct PhotoAssetDescriptor: Identifiable, Hashable, Sendable {
     let duration: TimeInterval
     let pixelWidth: Int
     let pixelHeight: Int
+    let modificationDate: Date?
+    let isScreenshot: Bool
+    let isPanorama: Bool
+    var isFavorite: Bool
+    let burstIdentifier: String?
+    let isSelfie: Bool
+
+    init(id: String, creationDate: Date?, coordinate: GeoCoordinate?, mediaKind: MediaKind,
+         duration: TimeInterval, pixelWidth: Int, pixelHeight: Int, modificationDate: Date? = nil,
+         isScreenshot: Bool = false, isPanorama: Bool = false, isFavorite: Bool = false,
+         burstIdentifier: String? = nil, isSelfie: Bool = false) {
+        self.id = id
+        self.creationDate = creationDate
+        self.coordinate = coordinate
+        self.mediaKind = mediaKind
+        self.duration = duration
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.modificationDate = modificationDate
+        self.isScreenshot = isScreenshot
+        self.isPanorama = isPanorama
+        self.isFavorite = isFavorite
+        self.burstIdentifier = burstIdentifier
+        self.isSelfie = isSelfie
+    }
 }
 
 enum GroupKind: String, Codable, CaseIterable, Sendable {
     case month
     case location
+    case type
 
     var title: String {
         switch self {
         case .month: String(localized: "Month")
         case .location: String(localized: "Location")
+        case .type: String(localized: "Type")
         }
     }
 }

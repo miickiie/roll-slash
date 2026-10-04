@@ -96,6 +96,7 @@ private struct GroupCompletionSnapshot: Sendable {
 private struct GroupBuildResult: Sendable {
     let month: [MediaGroup]
     let location: [MediaGroup]
+    let type: [MediaGroup]
 }
 
 @MainActor
@@ -104,6 +105,11 @@ final class AppModel {
     var route: AppRoute = .onboarding {
         didSet {
             guard route != oldValue else { return }
+            if route == .dashboard, grouping == .type {
+                startTypeAnalysis()
+            } else if route != .dashboard {
+                cancelTypeAnalysis()
+            }
             if route == .dashboard, grouping == .location, !assets.isEmpty {
                 resolveMissingLocations()
             } else if route != .dashboard {
@@ -116,6 +122,7 @@ final class AppModel {
     var grouping: GroupKind = .month {
         didSet {
             selectedGroupIDs.removeAll()
+            if grouping == .type { startTypeAnalysis() } else { cancelTypeAnalysis() }
             if grouping == .location {
                 resolveMissingLocations()
             } else {
@@ -126,6 +133,20 @@ final class AppModel {
     }
     var monthGroups: [MediaGroup] = []
     var locationGroups: [MediaGroup] = []
+    var typeGroups: [MediaGroup] = []
+    @ObservationIgnored private(set) var analysisResults: [String: MediaAnalysisResult] = [:]
+    private(set) var similarClusters: [SimilarPhotoCluster] = []
+    private(set) var isAnalyzingTypes = false
+    private(set) var typeAnalysisCompleted = 0
+    private(set) var typeAnalysisTotal = 0
+
+    private(set) var typeAnalysisUnavailableCount = 0
+    private var hasUnavailableSimilarity = false
+
+    var similarityWarning: String? {
+        hasUnavailableSimilarity
+            ? String(localized: "Similarity detection is unavailable on this device. Other type detection continues.") : nil
+    }
     var selectedGroupIDs: Set<String> = []
     var assets: [PhotoAssetDescriptor] = []
     private(set) var assetIndex: [String: PhotoAssetDescriptor] = [:]
@@ -143,6 +164,13 @@ final class AppModel {
     @ObservationIgnored let previewProvider: any MediaPreviewProvider
     @ObservationIgnored private let locationResolver: any LocationResolver
     @ObservationIgnored private let repository: any CleanupRepository
+    @ObservationIgnored private let analysisClient: any MediaAnalysisClient
+    @ObservationIgnored private var typeAnalysisTask: Task<Void, Never>?
+    @ObservationIgnored private var typeAnalysisGeneration = 0
+    @ObservationIgnored private var analysisCacheBuffer: [String: MediaAnalysisCacheEntry] = [:]
+    @ObservationIgnored private var analysisCacheFlushTask: Task<Void, Never>?
+    @ObservationIgnored private var unavailableSimilarityCount = 0
+    @ObservationIgnored private var isForeground = true
     @ObservationIgnored private let cleanupMetricsStore: CleanupMetricsStore
     @ObservationIgnored private var hasStarted = false
     @ObservationIgnored private var bucketLocations: [String: ResolvedLocation] = [:]
@@ -155,19 +183,25 @@ final class AppModel {
         photoLibrary: any PhotoLibraryClient,
         previewProvider: any MediaPreviewProvider,
         locationResolver: any LocationResolver,
-        modelContainer: ModelContainer
+        modelContainer: ModelContainer,
+        analysisClient: any MediaAnalysisClient = PhotoKitMediaAnalysisClient()
     ) {
         self.photoLibrary = photoLibrary
         self.previewProvider = previewProvider
         self.locationResolver = locationResolver
         self.repository = SwiftDataCleanupRepository(container: modelContainer)
+        self.analysisClient = analysisClient
         let cleanupMetricsStore = CleanupMetricsStore()
         self.cleanupMetricsStore = cleanupMetricsStore
         self.lifetimeCleanupSummary = cleanupMetricsStore.summary()
     }
 
     var visibleGroups: [MediaGroup] {
-        grouping == .month ? monthGroups : locationGroups
+        switch grouping {
+        case .month: monthGroups
+        case .location: locationGroups
+        case .type: typeGroups
+        }
     }
 
     var selectedGroups: [MediaGroup] {
@@ -175,17 +209,37 @@ final class AppModel {
     }
 
     var selectedCandidateCount: Int {
-        return selectedGroups.reduce(into: Set<String>()) { identifiers, group in
-            if group.isCleaned {
-                identifiers.formUnion(group.assetIDs)
-            } else {
-                identifiers.formUnion(group.assetIDs.filter { decisionsByAssetID[$0] == nil })
-            }
-        }.count
+        selectedCandidateIDs.count
     }
 
-    var selectedUnresolvedCount: Int {
-        selectedCandidateCount
+    private var selectedCandidateIDs: Set<String> {
+        selectedGroups.reduce(into: Set<String>()) { identifiers, group in
+            for id in group.assetIDs where assetIndex[id] != nil {
+                if group.isCleaned || decisionsByAssetID[id] == nil { identifiers.insert(id) }
+            }
+        }
+    }
+
+    private var selectedCleanupPlan: CleanupWorkPlan {
+        let identifiers = selectedCandidateIDs
+        let ordered = assets.filter { identifiers.contains($0.id) }.sorted {
+            let lhs = $0.creationDate ?? .distantPast, rhs = $1.creationDate ?? .distantPast
+            return lhs == rhs ? $0.id < $1.id : lhs > rhs
+        }.map(\.id)
+        var units: [CleanupWorkUnit] = []
+        var compared = Set<String>()
+        if selectedGroupIDs.contains(MediaTypeCategory.similarPhotos.key.id) {
+            for cluster in similarClusters {
+                let all = cluster.assetIDs.filter { assetIndex[$0] != nil }
+                let review = all.filter { identifiers.contains($0) && !compared.contains($0) }
+                guard !review.isEmpty, all.count >= 2 else { continue }
+                units.append(CleanupWorkUnit(kind: .comparison, assetIDs: review,
+                                             contextAssetIDs: all.filter { !identifiers.contains($0) }, clusterID: cluster.id))
+                compared.formUnion(review)
+            }
+        }
+        units += ordered.filter { !compared.contains($0) }.map(CleanupWorkUnit.swipe)
+        return CleanupWorkPlan(units: units)
     }
 
     var currentAsset: PhotoAssetDescriptor? {
@@ -193,6 +247,42 @@ final class AppModel {
               session.cursor < session.orderedAssetIDs.count else { return nil }
         let identifier = session.orderedAssetIDs[session.cursor]
         return assetIndex[identifier]
+    }
+
+    var currentComparison: CleanupWorkUnit? {
+        guard let session = activeSession, let unit = session.unit(at: session.cursor)?.unit,
+              unit.kind == .comparison else { return nil }
+        return unit
+    }
+
+    var comparisonDeleteIDs: Set<String> {
+        guard let session = activeSession, let unit = currentComparison else { return [] }
+        return session.draftDeleteIDs.intersection(unit.assetIDs)
+    }
+
+    func toggleComparisonDeletion(_ id: String) {
+        guard let session = activeSession, let unit = currentComparison, unit.assetIDs.contains(id),
+              session.workPlan != nil else { return }
+        let previous = session.draftDeleteIDs
+        var drafts = previous
+        if drafts.contains(id) { drafts.remove(id) } else { drafts.insert(id) }
+        session.draftDeleteIDs = drafts
+        do { try repository.save() } catch { session.draftDeleteIDs = previous; errorMessage = error.localizedDescription }
+    }
+
+    func confirmComparison(keepAll: Bool = false) async {
+        guard let session = activeSession, session.status == .swiping, let unit = currentComparison else { return }
+        let deletions = keepAll ? Set<String>() : comparisonDeleteIDs
+        do {
+            let sequence = session.cursor
+            let recorded = try repository.recordDecisions(session: session, decisions: unit.assetIDs.map {
+                ($0, deletions.contains($0) ? .deletePending : .keep)
+            })
+            actions.removeAll { $0.sequence >= sequence }
+            actions += recorded
+            try refreshDecisionCache()
+            await advanceAfterDecision()
+        } catch { errorMessage = error.localizedDescription }
     }
 
     var reviewCandidateAssets: [PhotoAssetDescriptor] {
@@ -278,11 +368,17 @@ final class AppModel {
             libraryReloadGeneration += 1
             isLoading = false
             locationResolutionTask?.cancel()
+            cancelTypeAnalysis()
             previewProvider.stopCachingAll()
             assets = []
             assetIndex = [:]
             monthGroups = []
             locationGroups = []
+            typeGroups = []
+            analysisResults = [:]
+            resetAnalysisWarnings()
+            typeAnalysisUnavailableCount = 0
+            similarClusters = []
             selectedGroupIDs.removeAll()
             route = .dashboard
         }
@@ -297,6 +393,7 @@ final class AppModel {
 
     func reloadLibrary() async {
         guard permission.canRead else { return }
+        cancelTypeAnalysis()
         libraryReloadGeneration += 1
         let generation = libraryReloadGeneration
         isLoading = true
@@ -312,13 +409,35 @@ final class AppModel {
             try reconcileSessionState(purgeMissingDecisions: permission == .full)
             try refreshDecisionCache()
             try loadCachedLocations()
+            let cachedResults = try repository.cachedAnalysis(for: assets)
+            // Keep valid existing sets visible during matching so a foreground
+            // refresh does not temporarily hide Similar Photos or move its scroll anchor.
+            similarClusters = similarClusters.filter { cluster in
+                cluster.assetIDs.allSatisfy { id in
+                    guard assetIndex[id] != nil, let cached = cachedResults[id],
+                          cached.featurePrint != nil, let previous = analysisResults[id] else { return false }
+                    return cached.featurePrint == previous.featurePrint && cached.perceptualHash == previous.perceptualHash
+                }
+            }
+            analysisResults = cachedResults
+            resetAnalysisWarnings()
+            typeAnalysisUnavailableCount = assets.filter { $0.mediaKind != .video && analysisResults[$0.id]?.isComplete != true }.count
             try await rebuildGroupsOffMain(expectedReloadGeneration: generation)
             guard generation == libraryReloadGeneration, permission.canRead else { return }
+            let clusters = await analysisClient.clusters(assets: assets, results: analysisResults)
+            guard generation == libraryReloadGeneration, permission.canRead else { return }
+            similarClusters = clusters
+            try await rebuildGroupsOffMain(expectedReloadGeneration: generation)
+            guard generation == libraryReloadGeneration, permission.canRead else { return }
+            isLoading = false
             if grouping == .location { resolveMissingLocations() }
+            if grouping == .type { startTypeAnalysis() }
             if let session = activeSession,
                session.status == .swiping,
                session.cursor >= session.orderedAssetIDs.count {
                 await finishSwiping()
+            } else if route == .cleanup || route == .similarComparison {
+                routeCurrentWorkUnit()
             }
         } catch {
             if generation == libraryReloadGeneration { errorMessage = error.localizedDescription }
@@ -339,17 +458,8 @@ final class AppModel {
             resumeSession()
             return
         }
-        let identifiers = selectedGroups.reduce(into: Set<String>()) { identifiers, group in
-            if group.isCleaned {
-                identifiers.formUnion(group.assetIDs)
-            } else {
-                identifiers.formUnion(group.assetIDs.filter { decisionsByAssetID[$0] == nil })
-            }
-        }
-        let ordered = assets
-            .filter { identifiers.contains($0.id) }
-            .sorted { ($0.creationDate ?? .distantPast) > ($1.creationDate ?? .distantPast) }
-            .map(\.id)
+        let plan = selectedCleanupPlan
+        let ordered = plan.assetIDs
         guard !ordered.isEmpty else { return }
 
         do {
@@ -357,10 +467,11 @@ final class AppModel {
             activeSession = try repository.createSession(
                 groupKind: grouping,
                 selectedGroupKeys: keys,
-                orderedAssetIDs: ordered
+                orderedAssetIDs: ordered,
+                workPlan: plan
             )
             actions = []
-            route = .cleanup
+            routeCurrentWorkUnit()
             preheatAroundCurrentAsset()
         } catch {
             errorMessage = error.localizedDescription
@@ -370,7 +481,7 @@ final class AppModel {
     func resumeSession() {
         guard let session = activeSession else { return }
         switch session.status {
-        case .swiping: route = .cleanup
+        case .swiping: routeCurrentWorkUnit()
         case .reviewing:
             session.status = .reviewing
             try? repository.save()
@@ -400,7 +511,7 @@ final class AppModel {
     func decide(_ decision: AssetDecision) async {
         guard let session = activeSession,
               session.status == .swiping,
-              session.cursor < session.orderedAssetIDs.count else { return }
+              session.cursor < session.orderedAssetIDs.count, currentComparison == nil else { return }
         let assetIdentifier = session.orderedAssetIDs[session.cursor]
         do {
             let sequence = session.cursor
@@ -410,11 +521,7 @@ final class AppModel {
             decisionsByAssetID[assetIdentifier] = decision
             actions.removeAll { $0.sequence >= sequence }
             actions.append(action)
-            if session.cursor == session.orderedAssetIDs.count {
-                await finishSwiping()
-            } else {
-                preheatAroundCurrentAsset()
-            }
+            await advanceAfterDecision()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -422,15 +529,13 @@ final class AppModel {
 
     func undo() {
         guard let session = activeSession, session.status == .swiping, session.cursor > 0 else { return }
-        let sequence = session.cursor - 1
-        guard let action = actions.first(where: { $0.sequence == sequence }) else { return }
+        guard let previous = session.unit(at: session.cursor - 1) else { return }
         do {
-            action.isApplied = false
-            try repository.restoreOriginalDecision(for: action.assetIdentifier, in: session)
+            try repository.setUnitApplied(session: session,
+                range: previous.start..<(previous.start + previous.unit.assetIDs.count), applied: false)
             try refreshDecisionCache()
-            session.cursor -= 1
-            try repository.save()
             actions = try repository.actions(for: session.identifier)
+            routeCurrentWorkUnit()
             preheatAroundCurrentAsset()
         } catch {
             errorMessage = error.localizedDescription
@@ -439,19 +544,14 @@ final class AppModel {
 
     func redo() async {
         guard let session = activeSession, session.status == .swiping,
-              let action = actions.first(where: { $0.sequence == session.cursor && !$0.isApplied }) else { return }
+              let unit = session.unit(at: session.cursor),
+              actions.contains(where: { $0.sequence == session.cursor && !$0.isApplied }) else { return }
         do {
-            action.isApplied = true
-            try repository.setDecision(action.decision, for: action.assetIdentifier, sessionIdentifier: session.identifier)
-            decisionsByAssetID[action.assetIdentifier] = action.decision
-            session.cursor += 1
-            try repository.save()
+            try repository.setUnitApplied(session: session,
+                range: unit.start..<(unit.start + unit.unit.assetIDs.count), applied: true)
+            try refreshDecisionCache()
             actions = try repository.actions(for: session.identifier)
-            if session.cursor == session.orderedAssetIDs.count {
-                await finishSwiping()
-            } else {
-                preheatAroundCurrentAsset()
-            }
+            await advanceAfterDecision()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -673,7 +773,7 @@ final class AppModel {
     }
 
     private func finalizeSession(_ session: CleanupSessionRecord, markGroupsCompleted: Bool = true) async throws {
-        let allGroups = monthGroups + locationGroups
+        let allGroups = monthGroups + locationGroups + typeGroups
         if markGroupsCompleted {
             for key in session.selectedGroupKeys {
                 let label = allGroups.first(where: { $0.key.id == key })?.title ?? key
@@ -706,12 +806,16 @@ final class AppModel {
         let assets = assets
         let decisions = decisionsByAssetID
         let bucketLocations = bucketLocations
+        let analysis = analysisResults
+        let similarIDs = Set(similarClusters.flatMap(\.assetIDs))
         let result = await Task.detached(priority: .userInitiated) {
             Self.buildGroups(
                 assets: assets,
                 decisions: decisions,
                 completions: completions,
-                bucketLocations: bucketLocations
+                bucketLocations: bucketLocations,
+                analysis: analysis,
+                similarIDs: similarIDs
             )
         }.value
         guard !Task.isCancelled,
@@ -720,6 +824,7 @@ final class AppModel {
               permission.canRead else { return }
         monthGroups = result.month
         locationGroups = result.location
+        typeGroups = result.type
     }
 
     private func completionSnapshots() throws -> [String: GroupCompletionSnapshot] {
@@ -736,7 +841,9 @@ final class AppModel {
         assets: [PhotoAssetDescriptor],
         decisions: [String: AssetDecision],
         completions: [String: GroupCompletionSnapshot],
-        bucketLocations: [String: ResolvedLocation]
+        bucketLocations: [String: ResolvedLocation],
+        analysis: [String: MediaAnalysisResult],
+        similarIDs: Set<String>
     ) -> GroupBuildResult {
         GroupBuildResult(
             month: buildMonthGroups(assets: assets, decisions: decisions, completions: completions),
@@ -745,8 +852,187 @@ final class AppModel {
                 decisions: decisions,
                 completions: completions,
                 bucketLocations: bucketLocations
-            )
+            ),
+            type: buildTypeGroups(assets: assets, decisions: decisions, analysis: analysis, similarIDs: similarIDs)
         )
+    }
+
+    nonisolated static func buildTypeGroups(assets: [PhotoAssetDescriptor], decisions: [String: AssetDecision],
+                                          analysis: [String: MediaAnalysisResult], similarIDs: Set<String>) -> [MediaGroup] {
+        MediaTypeCategory.allCases.compactMap { category in
+            let members = assets.filter { category.contains($0, analysis: analysis[$0.id], similarIDs: similarIDs) }
+            guard !members.isEmpty else { return nil }
+            let unresolved = members.filter { decisions[$0.id] == nil }.count
+            return MediaGroup(key: category.key, title: category.title, subtitle: itemCountText(members.count),
+                              assetIDs: members.map(\.id), unresolvedCount: unresolved,
+                              thumbnailAssetID: members.first?.id, isCleaned: unresolved == 0, sortDate: nil)
+        }
+    }
+
+    private func routeCurrentWorkUnit() {
+        guard let session = activeSession, session.status == .swiping else { return }
+        route = session.unit(at: session.cursor)?.unit.kind == .comparison ? .similarComparison : .cleanup
+    }
+
+    private func advanceAfterDecision() async {
+        guard let session = activeSession else { return }
+        if session.cursor >= session.orderedAssetIDs.count { await finishSwiping() }
+        else { routeCurrentWorkUnit(); preheatAroundCurrentAsset() }
+    }
+
+    private func cancelTypeAnalysis() {
+        typeAnalysisGeneration += 1
+        typeAnalysisTask?.cancel()
+        typeAnalysisTask = nil
+        analysisCacheFlushTask?.cancel()
+        analysisCacheFlushTask = nil
+        _ = flushAnalysisCache()
+        isAnalyzingTypes = false
+    }
+
+    @discardableResult
+    private func flushAnalysisCache() -> Bool {
+        guard !analysisCacheBuffer.isEmpty else { return true }
+        let entries = analysisCacheBuffer.values.filter { entry in
+            permission.canRead && assetIndex[entry.asset.id].map {
+                MediaAnalysisResult.signature(for: $0) == MediaAnalysisResult.signature(for: entry.asset)
+            } == true
+        }
+        do {
+            try repository.cacheAnalysis(entries)
+            analysisCacheBuffer.removeAll(keepingCapacity: true)
+            return true
+        } catch { errorMessage = error.localizedDescription; return false }
+    }
+
+    private func bufferAnalysis(_ result: MediaAnalysisResult, for asset: PhotoAssetDescriptor, generation: Int) -> Bool {
+        analysisCacheBuffer[asset.id] = MediaAnalysisCacheEntry(asset: asset, result: result)
+        if analysisCacheBuffer.count >= 25 { return flushAnalysisCache() }
+        if analysisCacheFlushTask == nil {
+            analysisCacheFlushTask = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                guard let self, generation == typeAnalysisGeneration else { return }
+                analysisCacheFlushTask = nil
+                if !flushAnalysisCache() { typeAnalysisTask?.cancel() }
+            }
+        }
+        return true
+    }
+
+    private func resetAnalysisWarnings() {
+        unavailableSimilarityCount = 0
+        for result in analysisResults.values { adjustAnalysisWarnings(result, delta: 1) }
+        publishAnalysisWarnings()
+    }
+
+    private func adjustAnalysisWarnings(_ result: MediaAnalysisResult, delta: Int) {
+        if result.similarityUnavailable { unavailableSimilarityCount += delta }
+    }
+
+    private func publishAnalysisWarnings() {
+        hasUnavailableSimilarity = unavailableSimilarityCount > 0
+    }
+
+    private func publishTypeGroups(generation: Int) async {
+        groupBuildGeneration += 1
+        let groupGeneration = groupBuildGeneration
+        let snapshot = assets, decisions = decisionsByAssetID, results = analysisResults
+        let similarIDs = Set(similarClusters.flatMap(\.assetIDs))
+        let groups = await Task.detached(priority: .utility) {
+            let interval = AnalysisPerformance.begin(.groups)
+            defer { AnalysisPerformance.end(.groups, interval) }
+            return Self.buildTypeGroups(assets: snapshot, decisions: decisions, analysis: results, similarIDs: similarIDs)
+        }.value
+        guard !Task.isCancelled, generation == typeAnalysisGeneration, groupGeneration == groupBuildGeneration,
+              permission.canRead, grouping == .type, route == .dashboard else { return }
+        typeGroups = groups
+    }
+
+    func setForeground(_ active: Bool) {
+        isForeground = active
+        if !active { cancelTypeAnalysis() }
+    }
+
+    private func startTypeAnalysis() {
+        guard isForeground, !isLoading, grouping == .type, route == .dashboard, permission.canRead, !assets.isEmpty else { return }
+        cancelTypeAnalysis()
+        let generation = typeAnalysisGeneration
+        let snapshot = assets
+        let photos = snapshot.filter { $0.mediaKind != .video }
+        let pending = photos.filter { analysisResults[$0.id]?.isComplete != true }
+        typeAnalysisTotal = photos.count
+        typeAnalysisCompleted = photos.count - pending.count
+        isAnalyzingTypes = !pending.isEmpty
+        typeAnalysisTask = Task { [weak self] in
+            guard let self else { return }
+            let interval = AnalysisPerformance.begin(.scan)
+            defer {
+                AnalysisPerformance.end(.scan, interval)
+                if generation == typeAnalysisGeneration {
+                    _ = flushAnalysisCache()
+                    isAnalyzingTypes = false
+                }
+            }
+            guard !pending.isEmpty else { return }
+            await analysisClient.prepare()
+            guard !Task.isCancelled, generation == typeAnalysisGeneration else { return }
+            let client = analysisClient
+            let previouslyCompleted = photos.count - pending.count
+            var unavailable = pending.count
+            var processed = 0
+            var fingerprintsChanged = false
+            let clock = ContinuousClock()
+            var lastPublication = clock.now
+            await withTaskGroup(of: (PhotoAssetDescriptor, MediaAnalysisResult).self) { group in
+                var next = 0, inFlight = 0
+                while next < pending.count || inFlight > 0 {
+                    guard !Task.isCancelled, generation == typeAnalysisGeneration, permission.canRead else {
+                        group.cancelAll(); return
+                    }
+                    let limit = max(1, min(2, await client.concurrencyLimit()))
+                    guard !Task.isCancelled, generation == typeAnalysisGeneration else { group.cancelAll(); return }
+                    while next < pending.count && inFlight < limit {
+                        let asset = pending[next], cached = analysisResults[pending[next].id]
+                        group.addTask(priority: .utility) { (asset, await client.analyze(asset, cachedResult: cached)) }
+                        next += 1; inFlight += 1
+                    }
+                    guard let (asset, analyzed) = await group.next() else { break }
+                    inFlight -= 1
+                    guard !Task.isCancelled, generation == typeAnalysisGeneration, permission.canRead,
+                          assetIndex[asset.id].map({ MediaAnalysisResult.signature(for: $0) }) == MediaAnalysisResult.signature(for: asset) else {
+                        group.cancelAll(); return
+                    }
+                    var result = analyzed
+                    let previous = analysisResults[asset.id]
+                    if let previous {
+                        result.isLarge = result.isLarge ?? previous.isLarge
+                        result.featurePrint = result.featurePrint ?? previous.featurePrint
+                        result.perceptualHash = result.perceptualHash ?? previous.perceptualHash
+                        adjustAnalysisWarnings(previous, delta: -1)
+                    }
+                    adjustAnalysisWarnings(result, delta: 1)
+                    fingerprintsChanged = fingerprintsChanged || result.featurePrint != previous?.featurePrint || result.perceptualHash != previous?.perceptualHash
+                    analysisResults[asset.id] = result
+                    processed += 1
+                    if result.isComplete { unavailable -= 1 }
+                    guard bufferAnalysis(result, for: asset, generation: generation) else { group.cancelAll(); return }
+                    let milestone = processed == 1 || (processed >= 8 && processed.nonzeroBitCount == 1) || processed == pending.count
+                    if milestone || lastPublication.duration(to: clock.now) >= .seconds(1) {
+                        typeAnalysisCompleted = previouslyCompleted + processed
+                        typeAnalysisUnavailableCount = unavailable
+                        publishAnalysisWarnings()
+                        if milestone && fingerprintsChanged {
+                            let clusters = await client.clusters(assets: snapshot, results: analysisResults)
+                            guard !Task.isCancelled, generation == typeAnalysisGeneration else { group.cancelAll(); return }
+                            similarClusters = clusters
+                            fingerprintsChanged = false
+                        }
+                        await publishTypeGroups(generation: generation)
+                        lastPublication = clock.now
+                    }
+                }
+            }
+        }
     }
 
     nonisolated private static func buildMonthGroups(
@@ -957,14 +1243,30 @@ final class AppModel {
         let reviewSelection = session.reviewSelectedIDs.filter(accessible.contains)
         let actionsNeedReplacement = validActions.count != existingActions.count
             || validActions.enumerated().contains { $0.offset != $0.element.sequence }
+        let originalPlan = session.workPlan
+        var reconciledPlan = originalPlan
+        if var plan = reconciledPlan {
+            plan.units = plan.units.compactMap { unit in
+                var unit = unit
+                unit.assetIDs = unit.assetIDs.filter(accessible.contains)
+                unit.contextAssetIDs = unit.contextAssetIDs.filter(accessible.contains)
+                guard !unit.assetIDs.isEmpty else { return nil }
+                if unit.assetIDs.count + unit.contextAssetIDs.count < 2 { unit.kind = .swipe }
+                return unit
+            }
+            plan.draftDeleteIDs.formIntersection(Set(plan.assetIDs))
+            reconciledPlan = plan
+        }
         guard reconciledOrder != session.orderedAssetIDs
                 || session.cursor != reconciledCursor
                 || reviewSelection != session.reviewSelectedIDs
-                || actionsNeedReplacement else { return }
+                || actionsNeedReplacement
+                || reconciledPlan != originalPlan else { return }
 
         session.orderedAssetIDs = reconciledOrder
         session.cursor = reconciledCursor
         session.reviewSelectedIDs = reviewSelection
+        session.workPlan = reconciledPlan
         try repository.replaceActions(
             sessionIdentifier: session.identifier,
             actions: validActions.enumerated().map { index, action in

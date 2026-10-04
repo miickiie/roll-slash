@@ -27,7 +27,7 @@ struct CompletionView: View {
                     .symbolEffect(.bounce, value: animate)
                 Text("Freshly slashed")
                     .font(.largeTitle.bold())
-                Text("This cleanup is complete. New media added later will automatically reopen its month or location group.")
+                Text("This cleanup is complete. New media added later will automatically reopen its matching groups.")
                     .font(.title3)
                     .foregroundStyle(.white.opacity(0.72))
                     .multilineTextAlignment(.center)

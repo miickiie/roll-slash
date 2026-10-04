@@ -48,6 +48,13 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
             options.includeAllBurstAssets = true
 
             let fetchResult = PHAsset.fetchAssets(in: library, options: options)
+            var selfieIDs = Set<String>()
+            let selfieAlbums = PHAssetCollection.fetchAssetCollections(with: .smartAlbum, subtype: .smartAlbumSelfPortraits, options: nil)
+            selfieAlbums.enumerateObjects { album, _, _ in
+                PHAsset.fetchAssets(in: album, options: options).enumerateObjects { asset, _, _ in
+                    if asset.mediaType == .image { selfieIDs.insert(asset.localIdentifier) }
+                }
+            }
             var descriptors: [PhotoAssetDescriptor] = []
             descriptors.reserveCapacity(fetchResult.count)
             fetchResult.enumerateObjects { asset, _, _ in
@@ -67,7 +74,13 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
                     mediaKind: kind,
                     duration: asset.duration,
                     pixelWidth: asset.pixelWidth,
-                    pixelHeight: asset.pixelHeight
+                    pixelHeight: asset.pixelHeight,
+                    modificationDate: asset.modificationDate,
+                    isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot),
+                    isPanorama: asset.mediaSubtypes.contains(.photoPanorama),
+                    isFavorite: asset.isFavorite,
+                    burstIdentifier: asset.burstIdentifier,
+                    isSelfie: selfieIDs.contains(asset.localIdentifier)
                 ))
             }
             return descriptors

@@ -13,9 +13,11 @@ struct MediaViewer: View {
 
     let asset: PhotoAssetDescriptor
     var initialImage: UIImage? = nil
+    var loadsFullResolution = false
     var onSwipeLeft: (() -> Void)? = nil
     var onSwipeRight: (() -> Void)? = nil
     var onDismissSwipe: ((CGSize) -> Void)? = nil
+    var dismissSwipeAxis: Axis? = nil
     var onClose: (() -> Void)? = nil
     var dismissalOffset: CGSize = .zero
     var dismissalOpacity: Double = 1
@@ -37,6 +39,16 @@ struct MediaViewer: View {
     @State private var isPreparingShare = false
     @State private var shareErrorMessage: String?
     @State private var favoriteErrorMessage: String?
+    @State private var loadGeneration = UUID()
+    @State private var isLoadingFullResolution = false
+    @State private var fullResolutionFailed = false
+    @State private var retryCount = 0
+
+    private struct LoadRequest: Hashable {
+        let identifier: String
+        let modificationDate: Date?
+        let retryCount: Int
+    }
 
     var body: some View {
         ZStack {
@@ -54,18 +66,23 @@ struct MediaViewer: View {
                 .ignoresSafeArea(edges: .bottom)
             } else {
                 content
-                    .ignoresSafeArea()
+                    .ignoresSafeArea(edges: .bottom)
                     .id(asset.id)
                     .offset(dismissalOffset)
 
                 VStack {
                     viewerToolbar.opacity(dismissalOpacity)
+                        .background(.black.opacity(0.72))
                     Spacer()
                 }
             }
         }
-        .task(id: asset.id) { await load() }
+        .preferredColorScheme(.dark)
+        .visibleSystemStatusBar()
+        .task(id: LoadRequest(identifier: asset.id, modificationDate: asset.modificationDate,
+                              retryCount: retryCount)) { await load() }
         .onDisappear {
+            loadGeneration = UUID()
             favoriteTask?.cancel()
             favoriteTask = nil
             shareTask?.cancel()
@@ -73,9 +90,14 @@ struct MediaViewer: View {
             player?.pause()
         }
         .onChange(of: asset.id) { _, _ in
+            favoriteTask?.cancel()
+            favoriteTask = nil
+            isUpdatingFavorite = false
             shareTask?.cancel()
             shareTask = nil
             isPreparingShare = false
+            cleanUpSharedVideo()
+            showingShareSheet = false
         }
         .sheet(isPresented: $showingShareSheet, onDismiss: cleanUpSharedVideo) {
             if asset.mediaKind == .video, let shareURL {
@@ -103,7 +125,7 @@ struct MediaViewer: View {
         .simultaneousGesture(
             DragGesture(minimumDistance: 24)
                 .onEnded { value in
-                    handleNavigationSwipe(value)
+                    handlePreviewSwipe(value)
                 }
         )
         .onLongPressGesture(minimumDuration: 0.1, pressing: { pressing in
@@ -120,7 +142,8 @@ struct MediaViewer: View {
         case .livePhoto:
             if let livePhoto, let image {
                 ZStack {
-                    ZoomableImage(image: image, zoomScale: $zoomScale, onDismissSwipe: onDismissSwipe)
+                    ZoomableImage(image: image, zoomScale: $zoomScale, onDismissSwipe: onDismissSwipe,
+                                  dismissSwipeAxis: dismissSwipeAxis)
                     if isLivePlaying && zoomScale <= 1.001 {
                         LivePhotoPlayer(photo: livePhoto, isPlaying: true)
                             .allowsHitTesting(false)
@@ -147,14 +170,15 @@ struct MediaViewer: View {
     @ViewBuilder
     private var zoomedStill: some View {
         if let image {
-            ZoomableImage(image: image, zoomScale: $zoomScale, onDismissSwipe: onDismissSwipe)
+            ZoomableImage(image: image, zoomScale: $zoomScale, onDismissSwipe: onDismissSwipe,
+                          dismissSwipeAxis: dismissSwipeAxis)
         } else if failed {
             ContentUnavailableView {
                 Label("Preview unavailable", systemImage: "icloud.slash")
             } description: {
                 Text("The item may still be in iCloud.")
             } actions: {
-                Button("Retry") { Task { await load() } }
+                Button("Retry") { retryCount += 1 }
             }
             .foregroundStyle(.white)
         } else {
@@ -170,9 +194,17 @@ struct MediaViewer: View {
 
     private var viewerToolbar: some View {
         HStack {
-            Text(asset.mediaKind == .video ? "Video preview" : "Photo preview")
-                .font(.headline)
-                .foregroundStyle(.white)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(asset.mediaKind == .video ? "Video preview" : "Photo preview")
+                    .font(.headline)
+                if isLoadingFullResolution {
+                    ProgressView("Loading full resolution…").font(.caption).tint(.white)
+                } else if fullResolutionFailed {
+                    Button("Retry full resolution") { retryCount += 1 }
+                        .font(.caption)
+                }
+            }
+            .foregroundStyle(.white)
             Spacer()
             if image != nil {
                 Button(
@@ -237,6 +269,9 @@ struct MediaViewer: View {
     }
 
     private func load() async {
+        let generation = UUID()
+        loadGeneration = generation
+        let identifier = asset.id
         player?.pause()
         player = nil
         image = initialImage
@@ -246,54 +281,82 @@ struct MediaViewer: View {
         zoomScale = 1
         failed = false
         isFavorite = false
+        isLoadingFullResolution = false
+        fullResolutionFailed = false
         favoriteErrorMessage = nil
         shareErrorMessage = nil
+        isUpdatingFavorite = true
+        let favorite = await appModel.isFavorite(identifier)
+        guard isCurrent(generation) else { return }
+        isFavorite = favorite
+        isUpdatingFavorite = false
         let target = CGSize(width: 1600, height: 2200)
         switch asset.mediaKind {
-        case .photo:
-            if let detailedImage = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active) {
+        case .photo, .livePhoto:
+            let detailedImage = await appModel.previewProvider.image(for: identifier, targetSize: target, kind: .active)
+            guard isCurrent(generation) else { return }
+            if let detailedImage {
                 image = detailedImage
                 hasDetailedImage = true
             }
-        case .livePhoto:
-            if let detailedImage = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active) {
-                image = detailedImage
-                hasDetailedImage = true
-            }
-            guard !Task.isCancelled else { return }
-            livePhoto = await appModel.previewProvider.livePhoto(for: asset.id, targetSize: target)
         case .video:
-            if let item = await appModel.previewProvider.playerItem(for: asset.id) {
-                guard !Task.isCancelled else { return }
+            let item = await appModel.previewProvider.playerItem(for: identifier)
+            guard isCurrent(generation) else { return }
+            if let item {
                 let newPlayer = AVPlayer(playerItem: item)
                 newPlayer.isMuted = isMuted
                 player = newPlayer
                 newPlayer.play()
             }
-            if let detailedImage = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active) {
+            let detailedImage = await appModel.previewProvider.image(for: identifier, targetSize: target, kind: .active)
+            guard isCurrent(generation) else { return }
+            if let detailedImage {
                 image = detailedImage
                 hasDetailedImage = true
             }
         }
-        guard !Task.isCancelled else { return }
-        isFavorite = await appModel.isFavorite(asset.id)
+        guard isCurrent(generation) else { return }
+        if loadsFullResolution && asset.mediaKind != .video {
+            isLoadingFullResolution = true
+            let original = await appModel.previewProvider.image(for: identifier, targetSize: target, kind: .fullResolution)
+            guard isCurrent(generation) else { return }
+            isLoadingFullResolution = false
+            if let original {
+                image = original
+                hasDetailedImage = true
+            } else {
+                fullResolutionFailed = true
+            }
+        }
+        if asset.mediaKind == .livePhoto {
+            let motion = await appModel.previewProvider.livePhoto(for: identifier, targetSize: target)
+            guard isCurrent(generation) else { return }
+            livePhoto = motion
+        }
         failed = image == nil && livePhoto == nil && player == nil
+    }
+
+    private func isCurrent(_ generation: UUID) -> Bool {
+        !Task.isCancelled && generation == loadGeneration
     }
 
     private func toggleFavorite() {
         guard !isUpdatingFavorite else { return }
         let nextValue = !isFavorite
+        let identifier = asset.id
+        let generation = loadGeneration
         isUpdatingFavorite = true
         favoriteTask?.cancel()
         favoriteTask = Task { @MainActor in
-            defer { isUpdatingFavorite = false }
+            defer { if generation == loadGeneration { isUpdatingFavorite = false } }
             do {
-                try await appModel.setFavorite(nextValue, for: asset.id)
-                guard !Task.isCancelled else { return }
+                try await appModel.setFavorite(nextValue, for: identifier)
+                guard isCurrent(generation) else { return }
                 isFavorite = nextValue
             } catch is CancellationError {
                 return
             } catch {
+                guard isCurrent(generation) else { return }
                 favoriteErrorMessage = error.localizedDescription
             }
         }
@@ -305,15 +368,18 @@ struct MediaViewer: View {
             return
         }
         guard !isPreparingShare else { return }
+        let identifier = asset.id
+        let generation = loadGeneration
         isPreparingShare = true
         shareTask = Task { @MainActor in
-            defer { isPreparingShare = false }
+            defer { if generation == loadGeneration { isPreparingShare = false } }
             do {
-                guard let url = try await appModel.previewProvider.shareableVideoURL(for: asset.id) else {
+                guard let url = try await appModel.previewProvider.shareableVideoURL(for: identifier) else {
+                    guard isCurrent(generation) else { return }
                     shareErrorMessage = String(localized: "This video is no longer available for sharing.")
                     return
                 }
-                guard !Task.isCancelled else {
+                guard isCurrent(generation) else {
                     try? FileManager.default.removeItem(at: url)
                     return
                 }
@@ -322,6 +388,7 @@ struct MediaViewer: View {
             } catch is CancellationError {
                 return
             } catch {
+                guard isCurrent(generation) else { return }
                 shareErrorMessage = error.localizedDescription
             }
         }
@@ -332,22 +399,17 @@ struct MediaViewer: View {
         shareURL = nil
     }
 
-    private func handleNavigationSwipe(_ value: DragGesture.Value) {
-        // Cleanup dismissal is handled by the fitted photo's gesture so blank
-        // margins around an aspect-fit image cannot dismiss the viewer.
-        guard onDismissSwipe == nil else { return }
+    private func handlePreviewSwipe(_ value: DragGesture.Value) {
+        // The photo owns dismissal and retains its release offset. A vertical
+        // dismissal policy still allows horizontal comparison navigation here.
+        guard onDismissSwipe == nil || dismissSwipeAxis == .vertical else { return }
         // VideoPlayer owns horizontal drags for scrubbing. Use the explicit
         // Previous/Next controls for video review navigation instead.
         guard asset.mediaKind != .video else { return }
         guard zoomScale <= 1.001 else { return }
-        guard abs(value.translation.width) > abs(value.translation.height) else { return }
-        guard abs(value.translation.width) >= 80 else { return }
-
-        if value.translation.width < 0 {
-            onSwipeLeft?()
-        } else {
-            onSwipeRight?()
-        }
+        guard abs(value.translation.width) > abs(value.translation.height),
+              abs(value.translation.width) >= 80 else { return }
+        if value.translation.width < 0 { onSwipeLeft?() } else { onSwipeRight?() }
     }
 }
 
@@ -392,6 +454,7 @@ private struct ZoomableImage: View {
     let image: UIImage
     @Binding var zoomScale: CGFloat
     var onDismissSwipe: ((CGSize) -> Void)? = nil
+    var dismissSwipeAxis: Axis? = nil
 
     @State private var offset = CGSize.zero
     @State private var gestureScale: CGFloat = 1
@@ -418,6 +481,7 @@ private struct ZoomableImage: View {
                         DragGesture()
                             .onChanged { value in
                                 if onDismissSwipe == nil
+                                    || dismissSwipeAxis == .vertical
                                     || zoomScale > 1.001
                                     || fittedPhotoRect(in: proxy.size).contains(value.startLocation) {
                                     gestureOffset = value.translation
@@ -426,11 +490,13 @@ private struct ZoomableImage: View {
                             .onEnded { value in
                                 let startsOnPhoto = fittedPhotoRect(in: proxy.size).contains(value.startLocation)
                                 let shouldDismiss = onDismissSwipe != nil
-                                    && startsOnPhoto
+                                    && (dismissSwipeAxis == .vertical || startsOnPhoto)
+                                    && (dismissSwipeAxis != .vertical || abs(value.translation.height) > abs(value.translation.width))
                                     && zoomScale <= 1.001
                                     && gestureScale <= 1.001
                                     && max(abs(value.translation.width), abs(value.translation.height)) >= 80
                                 if shouldDismiss {
+                                    // Do not snap to zero before the parent flies the preview out.
                                     onDismissSwipe?(value.translation)
                                 } else {
                                     offset = clampedOffset(

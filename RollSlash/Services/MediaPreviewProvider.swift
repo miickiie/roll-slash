@@ -6,6 +6,52 @@ import UIKit
 enum PreviewRequestKind: Sendable {
     case thumbnail
     case active
+    case comparison
+    case fullResolution
+}
+
+/// Keeps sizing, network policy, and final-quality delivery consistent across previews.
+struct PreviewImageConfiguration {
+    let targetSize: CGSize
+    let contentMode: PHImageContentMode
+    let options: PHImageRequestOptions
+
+    init(kind: PreviewRequestKind, targetSize: CGSize) {
+        self.targetSize = kind == .fullResolution ? PHImageManagerMaximumSize
+            : (kind == .thumbnail ? targetSize.bounded(to: 600) : targetSize)
+        contentMode = kind == .thumbnail ? .aspectFill : .aspectFit
+        options = PHImageRequestOptions()
+        options.version = .current
+        options.deliveryMode = kind == .thumbnail ? .fastFormat : .highQualityFormat
+        options.resizeMode = kind == .fullResolution ? .none : .fast
+        options.isNetworkAccessAllowed = kind == .active || kind == .fullResolution
+    }
+}
+
+@MainActor
+enum PreviewImageDelivery {
+    static func image(
+        kind: PreviewRequestKind,
+        start: (@escaping @Sendable (UIImage?, [AnyHashable: Any]?) -> Void) -> PHImageRequestID,
+        cancel: @escaping @MainActor @Sendable (PHImageRequestID) -> Void
+    ) async -> UIImage? {
+        guard !Task.isCancelled else { return nil }
+        let stream = AsyncStream<UIImage?> { continuation in
+            let requestID = start { image, info in
+                let cancelled = info?[PHImageCancelledKey] as? Bool == true
+                let error = info?[PHImageErrorKey] != nil
+                if !cancelled && !error && kind != .thumbnail,
+                   info?[PHImageResultIsDegradedKey] as? Bool == true { return }
+                continuation.yield(cancelled || error ? nil : image)
+                continuation.finish()
+            }
+            continuation.onTermination = { @Sendable _ in
+                Task { @MainActor in cancel(requestID) }
+            }
+        }
+        for await image in stream { return Task.isCancelled ? nil : image }
+        return nil
+    }
 }
 
 @MainActor
@@ -26,24 +72,14 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
 
     func image(for identifier: String, targetSize: CGSize, kind: PreviewRequestKind) async -> UIImage? {
         guard let asset = asset(for: identifier) else { return nil }
-        let options = PHImageRequestOptions()
-        options.deliveryMode = kind == .thumbnail ? .fastFormat : .highQualityFormat
-        options.resizeMode = .fast
-        options.isNetworkAccessAllowed = kind == .active
-        let requestSize = kind == .thumbnail ? targetSize.bounded(to: 600) : targetSize
-
-        let stream = AsyncStream<UIImage?> { continuation in
-            let contentMode: PHImageContentMode = kind == .thumbnail ? .aspectFill : .aspectFit
-            let requestID = manager.requestImage(for: asset, targetSize: requestSize, contentMode: contentMode, options: options) { image, _ in
-                continuation.yield(image)
-                continuation.finish()
-            }
-            continuation.onTermination = { @Sendable [weak self] _ in
-                Task { @MainActor in self?.manager.cancelImageRequest(requestID) }
-            }
+        let configuration = PreviewImageConfiguration(kind: kind, targetSize: targetSize)
+        return await PreviewImageDelivery.image(kind: kind) { handler in
+            manager.requestImage(for: asset, targetSize: configuration.targetSize,
+                                 contentMode: configuration.contentMode, options: configuration.options,
+                                 resultHandler: handler)
+        } cancel: { [manager] requestID in
+            manager.cancelImageRequest(requestID)
         }
-        for await image in stream { return image }
-        return nil
     }
 
     func livePhoto(for identifier: String, targetSize: CGSize) async -> PHLivePhoto? {

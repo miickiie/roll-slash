@@ -97,6 +97,103 @@ struct RepositoryTests {
         ).isEmpty)
     }
 
+    @Test("draft writes and swipe decisions leave a large frozen plan unchanged")
+    func frozenPlanWrites() throws {
+        let container = try makeContainer()
+        let repository = SwiftDataCleanupRepository(container: container)
+        let ids = (0..<26_000).map { "asset-\($0)" }
+        let comparison = CleanupWorkUnit(kind: .comparison, assetIDs: Array(ids.prefix(2)),
+                                         contextAssetIDs: [], clusterID: "first")
+        let plan = CleanupWorkPlan(units: [comparison] + ids.dropFirst(2).map(CleanupWorkUnit.swipe))
+        let session = try repository.createSession(groupKind: .type, selectedGroupKeys: [], orderedAssetIDs: ids, workPlan: plan)
+        let frozenData = try #require(session.workPlanData)
+        session.draftDeleteIDs = [ids[0]]
+        try repository.save()
+        _ = try repository.recordDecisions(session: session, decisions: [(ids[0], .deletePending), (ids[1], .keep)])
+        _ = try repository.recordDecision(session: session, assetIdentifier: ids[2], decision: .keep)
+        #expect(session.workPlanData == frozenData)
+        #expect(session.draftDeleteIDs.isEmpty)
+        #expect(session.unit(at: 1)?.start == 0)
+        #expect(session.unit(at: 2)?.unit == .swipe(ids[2]))
+        #expect(session.unit(at: 25_999)?.unit == .swipe(ids[25_999]))
+        #expect(session.unit(at: -1) == nil)
+        #expect(session.unit(at: 26_000) == nil)
+        let reopened = try #require(try SwiftDataCleanupRepository(container: container).activeSession())
+        #expect(reopened.unit(at: 25_999)?.start == 25_999)
+
+        let clock = ContinuousClock()
+        let cachedStart = clock.now
+        for cursor in 25_950..<26_000 { #expect(session.unit(at: cursor)?.start == cursor) }
+        let cachedDuration = cachedStart.duration(to: clock.now)
+        let uncachedStart = clock.now
+        for cursor in 25_950..<26_000 {
+            let decoded = try JSONDecoder().decode(CleanupWorkPlan.self, from: frozenData)
+            var start = 0
+            for unit in decoded.units {
+                if cursor < start + unit.assetIDs.count { break }
+                start += unit.assetIDs.count
+            }
+            #expect(start == cursor)
+        }
+        print("26,000-asset session, 50 late-cursor lookups: cached \(cachedDuration), repeated decode/walk \(uncachedStart.duration(to: clock.now))")
+    }
+
+    @Test("legacy embedded drafts load and byte changes invalidate session lookup caches")
+    func legacyDraftsAndInvalidation() throws {
+        let session = CleanupSessionRecord(groupKind: .type, selectedGroupKeys: [], orderedAssetIDs: ["a", "b", "c"])
+        let unit = CleanupWorkUnit(kind: .comparison, assetIDs: ["a", "b"], contextAssetIDs: [], clusterID: "legacy")
+        session.workPlanData = try JSONEncoder().encode(CleanupWorkPlan(units: [unit, .swipe("c")], draftDeleteIDs: ["b"]))
+        #expect(session.comparisonDraftDeleteIDsData == nil)
+        #expect(session.workPlan?.draftDeleteIDs == ["b"])
+        #expect(session.unit(at: 2)?.start == 2)
+        let data = session.workPlanData
+        session.draftDeleteIDs = ["a"]
+        #expect(session.workPlan?.draftDeleteIDs == ["a"])
+        #expect(session.workPlanData == data)
+        session.workPlanData = try JSONEncoder().encode(CleanupWorkPlan(units: [.swipe("c")]))
+        #expect(session.unit(at: 0)?.unit == .swipe("c"))
+        #expect(session.unit(at: 1) == nil)
+        #expect(session.orderedAssetIDs == ["a", "b", "c"])
+        session.orderedAssetIDsData = try JSONEncoder().encode(["c"])
+        session.workPlanData = nil
+        #expect(session.orderedAssetIDs == ["c"])
+        #expect(session.unit(at: 0)?.unit == .swipe("c"))
+    }
+
+    @Test("legacy and separate comparison drafts survive reopening a disk store")
+    func diskDraftPersistence() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("RollSlash-session-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("session.store")
+        let unit = CleanupWorkUnit(kind: .comparison, assetIDs: ["a", "b"], contextAssetIDs: [], clusterID: "legacy")
+        let legacyData = try JSONEncoder().encode(CleanupWorkPlan(units: [unit], draftDeleteIDs: ["a"]))
+        func openStore() throws -> SwiftDataCleanupRepository {
+            let configuration = ModelConfiguration(url: url, cloudKitDatabase: .none)
+            let container = try ModelContainer(for: RollSlashSchema.schema, configurations: [configuration])
+            return SwiftDataCleanupRepository(container: container)
+        }
+        do {
+            let repository = try openStore()
+            let session = try repository.createSession(groupKind: .type, selectedGroupKeys: [], orderedAssetIDs: ["a", "b"])
+            session.workPlanData = legacyData
+            try repository.save()
+        }
+        do {
+            let repository = try openStore()
+            let session = try #require(try repository.activeSession())
+            #expect(session.comparisonDraftDeleteIDsData == nil)
+            #expect(session.draftDeleteIDs == ["a"])
+            session.draftDeleteIDs = ["b"]
+            try repository.save()
+        }
+        let repository = try openStore()
+        let session = try #require(try repository.activeSession())
+        #expect(session.workPlanData == legacyData)
+        #expect(session.workPlan?.draftDeleteIDs == ["b"])
+        #expect(session.unit(at: 1)?.unit == unit)
+    }
+
     private func makeContainer() throws -> ModelContainer {
         return try ModelContainer(
             for: RollSlashSchema.schema,

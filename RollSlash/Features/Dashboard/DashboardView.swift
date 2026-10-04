@@ -7,6 +7,17 @@ struct DashboardScrollMemory {
     var locationAnchorID: String?
     var monthOrder: [String] = []
     var locationOrder: [String] = []
+    var typeID: String?
+    var typeAnchorID: String?
+    var typeOrder: [String] = []
+
+    mutating func reconcileType(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        let resolved = Self.validAnchor(typeAnchorID ?? typeID, previous: typeOrder, current: ids)
+        typeAnchorID = resolved
+        typeID = resolved
+        typeOrder = ids
+    }
 
     mutating func reconcileMonth(_ ids: [String]) {
         guard !ids.isEmpty else { return }
@@ -126,6 +137,26 @@ struct DashboardView: View {
                 .padding(.horizontal)
                 .padding(.vertical, 10)
 
+                if appModel.grouping == .type {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if appModel.isAnalyzingTypes {
+                            ProgressView("Analyzing local photos… \(appModel.typeAnalysisCompleted)/\(appModel.typeAnalysisTotal)",
+                                         value: Double(appModel.typeAnalysisCompleted), total: Double(max(1, appModel.typeAnalysisTotal)))
+                                .accessibilityIdentifier("type-analysis-progress")
+                        }
+                        Text("Photos can appear in more than one group. Analysis uses local media without iCloud downloads.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if !appModel.isAnalyzingTypes && appModel.typeAnalysisUnavailableCount > 0 {
+                            Text("\(appModel.typeAnalysisUnavailableCount) photos could not be fully analyzed. Roll Slash will retry when they become available.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        if let warning = appModel.similarityWarning {
+                            Text(warning).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal).padding(.bottom, 8)
+                }
+
                 if appModel.isLoading && appModel.assets.isEmpty {
                     Spacer()
                     ProgressView("Reading your library…")
@@ -144,6 +175,7 @@ struct DashboardView: View {
         }
         .safeAreaInset(edge: .bottom) {
             if appModel.activeSession == nil && !appModel.selectedGroupIDs.isEmpty {
+                let selectedCount = appModel.selectedCandidateCount
                 Button {
                     mascotDidMove()
                     appModel.beginSelectedCleanup()
@@ -151,7 +183,7 @@ struct DashboardView: View {
                     VStack(spacing: 2) {
                         Text("Clean \(appModel.selectedGroupIDs.count) groups")
                             .font(.headline)
-                        Text("\(appModel.selectedCandidateCount) items to review")
+                        Text("\(selectedCount) items to review")
                             .font(.caption)
                     }
                     .frame(maxWidth: .infinity)
@@ -159,7 +191,7 @@ struct DashboardView: View {
                 }
                 .buttonStyle(.glassProminent)
                 .tint(RollSlashTheme.violet)
-                .disabled(appModel.selectedUnresolvedCount == 0)
+                .disabled(selectedCount == 0)
                 .accessibilityIdentifier("clean-selected")
                 .padding()
             }
@@ -392,10 +424,53 @@ private struct GroupList: View {
     let onInteraction: () -> Void
     @State private var dragStarted = false
     @State private var didRestoreLocation = false
+    @State private var didRestoreType = false
 
     var body: some View {
         if appModel.grouping == .month {
             MonthGroupList(scrollMemory: $scrollMemory, onInteraction: onInteraction)
+        } else if appModel.grouping == .type {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(appModel.typeGroups) { group in
+                            GroupRow(group: group, onSelect: { scrollMemory.typeAnchorID = group.id })
+                                .id(group.id)
+                        }
+                    }
+                    .scrollTargetLayout()
+                    .padding(.horizontal)
+                    .padding(.bottom, 120)
+                }
+                .scrollPosition(id: $scrollMemory.typeID)
+                .accessibilityIdentifier("type-group-list")
+                .task(id: appModel.typeGroups.map(\.id)) {
+                    let ids = appModel.typeGroups.map(\.id)
+                    guard !ids.isEmpty else { return }
+                    if didRestoreType {
+                        if let anchor = scrollMemory.typeAnchorID, !ids.contains(anchor) { scrollMemory.reconcileType(ids) }
+                        else { scrollMemory.typeOrder = ids }
+                        return
+                    }
+                    scrollMemory.reconcileType(ids)
+                    didRestoreType = true
+                    if let anchor = scrollMemory.typeAnchorID {
+                        await Task.yield()
+                        proxy.scrollTo(anchor, anchor: .center)
+                    }
+                }
+                .onDisappear { didRestoreType = false }
+                .simultaneousGesture(DragGesture(minimumDistance: 8)
+                    .onChanged { _ in
+                        guard !dragStarted else { return }
+                        dragStarted = true
+                        onInteraction()
+                    }
+                    .onEnded { _ in
+                        dragStarted = false
+                        if let id = scrollMemory.typeID { scrollMemory.typeAnchorID = id }
+                    })
+            }
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -617,7 +692,7 @@ private struct MonthGroupCard: View {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("Review \(group.title) again?")
                         .font(.headline)
-                    Text("All \(group.totalCount) accessible items in this group will be added to a new swipe session. Nothing is deleted until final review.")
+                    Text("All \(group.totalCount) accessible items in this group will be added to a new cleanup session. Nothing is deleted until final review.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     PopupActionRow {

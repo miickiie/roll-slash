@@ -14,17 +14,22 @@ struct RootView: View {
                 DashboardView(scrollMemory: $dashboardScroll)
             case .cleanup:
                 CleanupView()
+            case .similarComparison:
+                SimilarComparisonView()
             case .review:
                 ReviewView()
             case .completion:
                 CompletionView()
             }
         }
+        .visibleSystemStatusBar()
+        .preferredColorScheme(appModel.route == .cleanup ? .dark : nil)
         .animation(.snappy, value: appModel.route)
         .task {
             await appModel.start()
         }
         .onChange(of: scenePhase) { _, phase in
+            appModel.setForeground(phase == .active)
             guard phase == .active else { return }
             Task { await appModel.refreshAuthorization() }
         }

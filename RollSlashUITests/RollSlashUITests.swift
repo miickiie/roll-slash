@@ -214,6 +214,311 @@ final class RollSlashUITests: XCTestCase {
         XCTAssertTrue(target.isHittable)
     }
 
+    func testTypeOverlapComparisonPreviewResumeAndBatchUndo() {
+        let app = XCUIApplication()
+        app.launchArguments.append("--ui-testing")
+        app.launch()
+        XCTAssertTrue(app.buttons["Type"].waitForExistence(timeout: 5))
+        app.buttons["Type"].tap()
+        let similar = app.buttons["group-row-type:similarPhotos"]
+        XCTAssertTrue(similar.waitForExistence(timeout: 5))
+        let dashboard = XCTAttachment(screenshot: app.screenshot())
+        dashboard.name = "Type dashboard"
+        dashboard.lifetime = .keepAlways
+        add(dashboard)
+        app.buttons["group-row-type:screenshots"].tap()
+        similar.tap()
+        XCTAssertTrue(app.staticTexts["2 items to review"].exists)
+        app.buttons["clean-selected"].tap()
+        let confirm = app.buttons["comparison-confirm"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons["comparison-delete-demo-1"].value as? String, "Not selected to delete")
+        let comparison = XCTAttachment(screenshot: app.screenshot())
+        comparison.name = "Similar Photos comparison"
+        comparison.lifetime = .keepAlways
+        add(comparison)
+        app.buttons["comparison-preview-demo-1"].tap()
+        XCTAssertTrue(app.buttons["close-media-viewer"].waitForExistence(timeout: 3))
+        app.buttons["close-media-viewer"].tap()
+        app.buttons["comparison-delete-demo-2"].tap()
+        app.buttons["Close"].tap()
+        XCTAssertTrue(app.buttons["Resume"].waitForExistence(timeout: 3))
+        app.buttons["Resume"].tap()
+        XCTAssertTrue(confirm.waitForExistence(timeout: 3))
+        XCTAssertEqual(app.buttons["comparison-delete-demo-2"].value as? String, "Selected to delete")
+        confirm.tap()
+        XCTAssertTrue(app.navigationBars["Final review"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["1 selected for deletion"].exists)
+        app.buttons["Undo Last"].tap()
+        XCTAssertTrue(confirm.waitForExistence(timeout: 3))
+        XCTAssertEqual(app.buttons["comparison-delete-demo-2"].value as? String, "Selected to delete")
+        confirm.tap()
+        XCTAssertTrue(app.buttons["commit-deletion"].waitForExistence(timeout: 3))
+        app.buttons["commit-deletion"].tap()
+        XCTAssertTrue(app.staticTexts["Freshly slashed"].waitForExistence(timeout: 5))
+    }
+
+    func testTypeScrollRestorationAndMetadataGroups() {
+        let app = XCUIApplication()
+        app.launchArguments.append("--ui-testing")
+        app.launch()
+        XCTAssertTrue(app.buttons["Type"].waitForExistence(timeout: 5))
+        app.buttons["Type"].tap()
+        let list = app.scrollViews["type-group-list"]
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["group-row-type:receipts"].exists)
+        let target = app.buttons["group-row-type:selfies"]
+        for _ in 0..<6 where !target.isHittable { list.swipeUp() }
+        XCTAssertTrue(target.isHittable)
+        target.tap()
+        app.buttons["clean-selected"].tap()
+        XCTAssertTrue(app.buttons["decision-keep"].waitForExistence(timeout: 3))
+        app.buttons["decision-keep"].tap()
+        XCTAssertTrue(app.staticTexts["Freshly slashed"].waitForExistence(timeout: 3))
+        app.buttons["Back to library"].tap()
+        XCTAssertTrue(target.waitForExistence(timeout: 3))
+        XCTAssertTrue(target.isHittable)
+        app.buttons["Month"].tap()
+        app.buttons["Type"].tap()
+        XCTAssertTrue(target.waitForExistence(timeout: 3))
+        XCTAssertTrue(target.isHittable)
+    }
+
+    func testSimilarPreviewSelectionNavigationAndZoomStayWithinFrozenSet() {
+        let app = XCUIApplication()
+        app.launchArguments += ["--ui-testing", "--comparison-fixtures"]
+        app.launch()
+        XCTAssertTrue(app.buttons["Type"].waitForExistence(timeout: 5))
+        app.buttons["Type"].tap()
+        let similar = app.buttons["group-row-type:similarPhotos"]
+        XCTAssertTrue(similar.waitForExistence(timeout: 5))
+        similar.tap()
+        app.buttons["clean-selected"].tap()
+
+        let portrait = app.buttons["comparison-preview-demo-1"]
+        let landscape = app.buttons["comparison-preview-demo-2"]
+        XCTAssertTrue(portrait.waitForExistence(timeout: 5))
+        XCTAssertTrue(landscape.waitForExistence(timeout: 3))
+        XCTAssertEqual(portrait.frame.width, landscape.frame.width, accuracy: 1)
+        XCTAssertEqual(portrait.frame.width, portrait.frame.height, accuracy: 1)
+        XCTAssertEqual(portrait.frame.minY, landscape.frame.minY, accuracy: 1)
+        XCTAssertLessThan(portrait.frame.maxX, landscape.frame.minX)
+        saveScreenshot(app, name: "Two columns with whole portrait and landscape photos")
+
+        portrait.tap()
+        let position = app.staticTexts["comparison-viewer-position"]
+        XCTAssertTrue(position.waitForExistence(timeout: 3))
+        XCTAssertEqual(position.label, "1 of 3")
+        XCTAssertFalse(app.buttons["comparison-viewer-previous"].isEnabled)
+        let toggle = app.buttons["comparison-viewer-toggle"]
+        XCTAssertEqual(toggle.value as? String, "Not selected to delete")
+        toggle.tap()
+        XCTAssertEqual(toggle.value as? String, "Selected to delete")
+        app.swipeRight()
+        XCTAssertEqual(position.label, "1 of 3")
+        app.swipeLeft()
+        XCTAssertEqual(position.label, "2 of 3")
+        XCTAssertEqual(toggle.value as? String, "Not selected to delete")
+        saveScreenshot(app, name: "Full resolution similar preview with delete selection")
+
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).doubleTap()
+        app.swipeLeft()
+        XCTAssertEqual(position.label, "2 of 3", "Zoomed swipes must pan instead of navigating")
+        app.buttons["comparison-viewer-next"].tap()
+        XCTAssertEqual(position.label, "3 of 3")
+        XCTAssertFalse(app.buttons["comparison-viewer-next"].isEnabled)
+        app.swipeLeft()
+        XCTAssertEqual(position.label, "3 of 3", "The second similar set must never join this preview")
+        app.swipeRight()
+        XCTAssertEqual(position.label, "2 of 3", "Changing photos must reset zoom")
+        app.buttons["comparison-viewer-previous"].tap()
+        XCTAssertEqual(toggle.value as? String, "Selected to delete")
+        let favorite = app.buttons["favorite-media"]
+        XCTAssertTrue(favorite.waitForExistence(timeout: 3))
+        XCTAssertTrue(waitUntilEnabled(favorite))
+        favorite.tap()
+        XCTAssertTrue(app.buttons["Remove from Favorites"].waitForExistence(timeout: 3))
+        XCTAssertEqual(position.label, "1 of 3")
+        saveScreenshot(app, name: "Similar preview status bar after favorite and selection")
+        app.buttons["close-media-viewer"].tap()
+        XCTAssertEqual(app.buttons["comparison-delete-demo-1"].value as? String, "Selected to delete")
+        app.buttons["Close"].tap()
+        XCTAssertTrue(app.buttons["Resume"].waitForExistence(timeout: 3))
+        app.buttons["Resume"].tap()
+        XCTAssertTrue(app.buttons["comparison-confirm"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.buttons["comparison-delete-demo-1"].value as? String, "Selected to delete")
+        app.buttons["comparison-confirm"].tap()
+        XCTAssertTrue(app.buttons["comparison-preview-demo-7"].waitForExistence(timeout: 3))
+        app.buttons["comparison-delete-demo-7"].tap()
+        app.buttons["comparison-undo"].tap()
+        XCTAssertTrue(app.buttons["comparison-delete-demo-1"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.buttons["comparison-delete-demo-1"].value as? String, "Selected to delete")
+        app.buttons["comparison-redo"].tap()
+        XCTAssertTrue(app.buttons["comparison-delete-demo-7"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.buttons["comparison-delete-demo-7"].value as? String, "Selected to delete")
+        app.buttons["comparison-keep-all"].tap()
+        XCTAssertTrue(app.navigationBars["Final review"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["1 selected for deletion"].exists)
+    }
+
+    func testSimilarPreviewVerticalSwipesDismissAndPreserveChoices() {
+        let app = XCUIApplication()
+        app.launchArguments += ["--ui-testing", "--comparison-fixtures"]
+        app.launch()
+        XCTAssertTrue(app.buttons["Type"].waitForExistence(timeout: 5))
+        app.buttons["Type"].tap()
+        let similar = app.buttons["group-row-type:similarPhotos"]
+        XCTAssertTrue(similar.waitForExistence(timeout: 5))
+        similar.tap()
+        app.buttons["clean-selected"].tap()
+
+        let firstPhoto = app.buttons["comparison-preview-demo-1"]
+        let confirm = app.buttons["comparison-confirm"]
+        XCTAssertTrue(firstPhoto.waitForExistence(timeout: 5))
+        for direction in 0..<2 {
+            firstPhoto.tap()
+            let close = app.buttons["close-media-viewer"]
+            XCTAssertTrue(close.waitForExistence(timeout: 3))
+            if direction == 0 { app.buttons["comparison-viewer-toggle"].tap() }
+            app.swipeLeft()
+            XCTAssertEqual(app.staticTexts["comparison-viewer-position"].label, "2 of 3")
+            if direction == 0 { app.swipeUp() } else { app.swipeDown() }
+            let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: close)
+            XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 3), .completed)
+            XCTAssertTrue(confirm.isHittable)
+            XCTAssertEqual(app.buttons["comparison-delete-demo-1"].value as? String, "Selected to delete")
+            XCTAssertTrue(app.staticTexts["5 left"].exists, "Closing inspection must not advance the comparison")
+            XCTAssertFalse(app.buttons["comparison-preview-demo-7"].exists)
+        }
+
+        firstPhoto.tap()
+        let close = app.buttons["close-media-viewer"]
+        XCTAssertTrue(close.waitForExistence(timeout: 3))
+        let center = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        center.doubleTap()
+        app.swipeUp()
+        XCTAssertTrue(close.exists, "A vertical drag on a zoomed photo must pan")
+        app.swipeDown()
+        XCTAssertTrue(close.exists, "Both vertical directions must preserve a zoomed preview")
+        XCTAssertEqual(app.staticTexts["comparison-viewer-position"].label, "1 of 3")
+        center.doubleTap()
+        app.swipeDown()
+        let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: close)
+        XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 3), .completed)
+        XCTAssertTrue(confirm.isHittable)
+        XCTAssertEqual(app.buttons["comparison-delete-demo-1"].value as? String, "Selected to delete")
+    }
+
+    func testSimilarTwoColumnsRemainBoundedAtAccessibilityTextSize() {
+        let app = XCUIApplication()
+        app.launchArguments += ["--ui-testing", "--comparison-fixtures", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+        XCTAssertTrue(app.buttons["Type"].waitForExistence(timeout: 5))
+        app.buttons["Type"].tap()
+        let similar = app.buttons["group-row-type:similarPhotos"]
+        for _ in 0..<5 where !similar.isHittable { app.scrollViews["type-group-list"].swipeUp() }
+        XCTAssertTrue(similar.isHittable)
+        similar.tap()
+        app.buttons["clean-selected"].tap()
+        let first = app.buttons["comparison-preview-demo-1"]
+        let second = app.buttons["comparison-preview-demo-2"]
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        XCTAssertTrue(second.waitForExistence(timeout: 3))
+        let scroll = app.scrollViews["comparison-grid-scroll"]
+        for _ in 0..<5 where !app.buttons["comparison-delete-demo-1"].isHittable { scroll.swipeUp() }
+        XCTAssertTrue(app.buttons["comparison-delete-demo-1"].isHittable)
+        XCTAssertTrue(app.buttons["comparison-delete-demo-2"].isHittable)
+        XCTAssertLessThan(first.frame.maxX, second.frame.minX)
+        XCTAssertGreaterThanOrEqual(first.frame.minX, 0)
+        XCTAssertLessThanOrEqual(second.frame.maxX, app.frame.width)
+        let firstToggle = app.buttons["comparison-delete-demo-1"]
+        let secondToggle = app.buttons["comparison-delete-demo-2"]
+        XCTAssertLessThan(firstToggle.frame.maxX, secondToggle.frame.minX)
+        saveScreenshot(app, name: "Two-column comparison at accessibility text size")
+    }
+
+    func testSimilarPreviewPreservesReadOnlyReviewedSiblings() {
+        let app = XCUIApplication()
+        app.launchArguments += ["--ui-testing", "--comparison-fixtures"]
+        app.launch()
+        XCTAssertTrue(app.buttons["Type"].waitForExistence(timeout: 5))
+        app.buttons["Type"].tap()
+        let screenshots = app.buttons["group-row-type:screenshots"]
+        XCTAssertTrue(screenshots.waitForExistence(timeout: 5))
+        screenshots.tap()
+        app.buttons["clean-selected"].tap()
+        for _ in 0..<2 {
+            let keep = app.buttons["decision-keep"]
+            XCTAssertTrue(keep.waitForExistence(timeout: 3))
+            XCTAssertTrue(waitUntilEnabled(keep))
+            keep.tap()
+        }
+        XCTAssertTrue(app.buttons["Back to library"].waitForExistence(timeout: 3))
+        app.buttons["Back to library"].tap()
+        let similar = app.buttons["group-row-type:similarPhotos"]
+        XCTAssertTrue(similar.waitForExistence(timeout: 3))
+        similar.tap()
+        app.buttons["clean-selected"].tap()
+        let preview = app.buttons["comparison-preview-demo-1"]
+        XCTAssertTrue(preview.waitForExistence(timeout: 3))
+        preview.tap()
+        XCTAssertTrue(app.staticTexts["comparison-viewer-read-only"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.staticTexts["comparison-viewer-read-only"].label, "Previously kept")
+        XCTAssertFalse(app.buttons["comparison-viewer-toggle"].exists)
+        app.buttons["comparison-viewer-previous"].tap()
+        XCTAssertTrue(app.buttons["comparison-viewer-toggle"].waitForExistence(timeout: 3))
+        app.buttons["comparison-viewer-toggle"].tap()
+        app.buttons["comparison-viewer-next"].tap()
+        XCTAssertFalse(app.buttons["comparison-viewer-toggle"].exists)
+        saveScreenshot(app, name: "Previously reviewed similar sibling remains read only")
+        app.buttons["close-media-viewer"].tap()
+        XCTAssertFalse(app.buttons["comparison-delete-demo-1"].exists)
+        XCTAssertEqual(app.buttons["comparison-delete-demo-4"].value as? String, "Selected to delete")
+    }
+
+    func testSimilarPreviewShareSheetReturnsToSavedChoice() {
+        let app = XCUIApplication()
+        app.launchArguments.append("--ui-testing")
+        app.launch()
+        XCTAssertTrue(app.buttons["Type"].waitForExistence(timeout: 5))
+        app.buttons["Type"].tap()
+        let similar = app.buttons["group-row-type:similarPhotos"]
+        XCTAssertTrue(similar.waitForExistence(timeout: 5))
+        similar.tap()
+        app.buttons["clean-selected"].tap()
+        let preview = app.buttons["comparison-preview-demo-1"]
+        XCTAssertTrue(preview.waitForExistence(timeout: 3))
+        preview.tap()
+        let toggle = app.buttons["comparison-viewer-toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 3))
+        toggle.tap()
+        let share = app.buttons["share-media"]
+        XCTAssertTrue(share.waitForExistence(timeout: 3))
+        share.tap()
+        let close = app.buttons["header.closeButton"]
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
+        saveScreenshot(app, name: "Similar preview with system share sheet")
+        let closeIsHittable = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "hittable == true"), object: close
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [closeIsHittable], timeout: 5), .completed)
+        close.tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 3))
+        XCTAssertEqual(toggle.value as? String, "Selected to delete")
+        XCTAssertEqual(app.staticTexts["comparison-viewer-position"].label, "1 of 2")
+        saveScreenshot(app, name: "Similar preview status bar after share dismissal")
+        app.buttons["close-media-viewer"].tap()
+        XCTAssertTrue(app.buttons["comparison-confirm"].waitForExistence(timeout: 3))
+        saveScreenshot(app, name: "Comparison status bar after preview dismissal")
+    }
+
+    private func saveScreenshot(_ app: XCUIApplication, name: String) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     private func waitUntilEnabled(_ element: XCUIElement) -> Bool {
         let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: element)
         return XCTWaiter.wait(for: [enabled], timeout: 3) == .completed

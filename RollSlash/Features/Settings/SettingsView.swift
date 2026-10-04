@@ -17,7 +17,8 @@ struct SettingsView: View {
                     Button("Open iOS Settings") { appModel.openSystemSettings() }
                 }
                 Section("Privacy") {
-                    Label("Roll Slash stores decisions, cleanup totals, and cached place names on this iPhone.", systemImage: "iphone")
+                    Label("Roll Slash stores decisions, cleanup totals, cached place names, and photo analysis results on this iPhone.", systemImage: "iphone")
+                    Label("Type detection runs on this iPhone without iCloud downloads or text recognition. Images are not stored.", systemImage: "sparkles")
                     Label("Photos are not kept in app storage. Sharing a video creates a temporary copy that is removed after sharing.", systemImage: "photo.on.rectangle")
                     Label("Only Photos, iCloud, and Maps use the network.", systemImage: "network")
                 }
