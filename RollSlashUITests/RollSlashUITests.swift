@@ -21,6 +21,26 @@ final class RollSlashUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Freshly slashed"].waitForExistence(timeout: 3))
     }
 
+    func testUnavailableVideoPreviewOffersRetry() {
+        let app = XCUIApplication()
+        app.launchArguments.append("--ui-testing")
+        app.launch()
+        let videoGroup = app.buttons["group-row-month:2026-09"]
+        XCTAssertTrue(videoGroup.waitForExistence(timeout: 5))
+        videoGroup.tap()
+        app.buttons["clean-selected"].tap()
+        XCTAssertTrue(app.buttons["open-media-viewer"].waitForExistence(timeout: 3))
+        app.buttons["open-media-viewer"].tap()
+        XCTAssertTrue(app.staticTexts["Preview unavailable"].waitForExistence(timeout: 3))
+        let retry = app.buttons["Retry"]
+        XCTAssertTrue(retry.exists)
+        retry.tap()
+        XCTAssertTrue(app.staticTexts["Preview unavailable"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.staticTexts["Loading preview…"].exists)
+        app.buttons["close-media-viewer"].tap()
+        XCTAssertTrue(app.buttons["decision-keep"].waitForExistence(timeout: 3))
+    }
+
     func testFinishPartialKeepOnlySession() {
         let app = XCUIApplication()
         app.launchArguments.append("--ui-testing")
@@ -240,12 +260,15 @@ final class RollSlashUITests: XCTestCase {
         app.buttons["comparison-preview-demo-1"].tap()
         XCTAssertTrue(app.buttons["close-media-viewer"].waitForExistence(timeout: 3))
         app.buttons["close-media-viewer"].tap()
-        app.buttons["comparison-delete-demo-2"].tap()
+        let deletionChoice = app.buttons["comparison-delete-demo-2"]
+        XCTAssertTrue(waitUntilHittable(deletionChoice))
+        deletionChoice.tap()
+        XCTAssertTrue(waitForValue(deletionChoice, "Selected to delete"))
         app.buttons["Close"].tap()
         XCTAssertTrue(app.buttons["Resume"].waitForExistence(timeout: 3))
         app.buttons["Resume"].tap()
         XCTAssertTrue(confirm.waitForExistence(timeout: 3))
-        XCTAssertEqual(app.buttons["comparison-delete-demo-2"].value as? String, "Selected to delete")
+        XCTAssertTrue(waitForValue(deletionChoice, "Selected to delete"))
         confirm.tap()
         XCTAssertTrue(app.navigationBars["Final review"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["1 selected for deletion"].exists)
@@ -522,5 +545,15 @@ final class RollSlashUITests: XCTestCase {
     private func waitUntilEnabled(_ element: XCUIElement) -> Bool {
         let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: element)
         return XCTWaiter.wait(for: [enabled], timeout: 3) == .completed
+    }
+
+    private func waitUntilHittable(_ element: XCUIElement) -> Bool {
+        let hittable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: element)
+        return XCTWaiter.wait(for: [hittable], timeout: 3) == .completed
+    }
+
+    private func waitForValue(_ element: XCUIElement, _ value: String) -> Bool {
+        let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", value), object: element)
+        return XCTWaiter.wait(for: [selected], timeout: 3) == .completed
     }
 }

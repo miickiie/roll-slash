@@ -24,7 +24,7 @@ protocol CleanupRepository: AnyObject {
     func cachedLocations(for bucketKeys: Set<String>, localeIdentifier: String) throws -> [String: ResolvedLocation]
     func cacheLocation(_ location: ResolvedLocation, for bucketKey: String) throws
     func resetHistory() throws
-    func cachedAnalysis(for assets: [PhotoAssetDescriptor]) throws -> [String: MediaAnalysisResult]
+    func cachedAnalysis(for assets: [PhotoAssetDescriptor], purgeMissing: Bool) throws -> [String: MediaAnalysisResult]
     func cacheAnalysis(_ result: MediaAnalysisResult, for asset: PhotoAssetDescriptor) throws
     func cacheAnalysis(_ entries: [MediaAnalysisCacheEntry]) throws
 }
@@ -167,13 +167,21 @@ final class SwiftDataCleanupRepository: CleanupRepository {
         }
     }
 
-    func cachedAnalysis(for assets: [PhotoAssetDescriptor]) throws -> [String: MediaAnalysisResult] {
+    func cachedAnalysis(for assets: [PhotoAssetDescriptor], purgeMissing: Bool = true) throws -> [String: MediaAnalysisResult] {
         let signatures = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, MediaAnalysisResult.signature(for: $0)) })
         var results: [String: MediaAnalysisResult] = [:]
         analysisIndex = nil
         var index: [String: MediaAnalysisCacheRecord] = [:]
         for record in try analysisContext.fetch(FetchDescriptor<MediaAnalysisCacheRecord>()) {
-            guard let signature = signatures[record.assetIdentifier], signature == record.signature else {
+            guard let signature = signatures[record.assetIdentifier] else {
+                if purgeMissing {
+                    analysisContext.delete(record)
+                } else {
+                    index[record.assetIdentifier] = record
+                }
+                continue
+            }
+            guard signature == record.signature else {
                 analysisContext.delete(record)
                 continue
             }

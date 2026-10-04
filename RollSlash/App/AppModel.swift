@@ -105,6 +105,9 @@ final class AppModel {
     var route: AppRoute = .onboarding {
         didSet {
             guard route != oldValue else { return }
+            if route != .cleanup && route != .similarComparison {
+                previewProvider.stopCachingAll()
+            }
             if route == .dashboard, grouping == .type {
                 startTypeAnalysis()
             } else if route != .dashboard {
@@ -154,7 +157,7 @@ final class AppModel {
     var activeSession: CleanupSessionRecord?
     var actions: [CleanupActionRecord] = []
     var isLoading = false
-    var isDeleting = false
+    private(set) var isDeleting = false
     var errorMessage: String?
     var showingSettings = false
     private(set) var lifetimeCleanupSummary = CleanupMetricsSummary.zero
@@ -261,7 +264,8 @@ final class AppModel {
     }
 
     func toggleComparisonDeletion(_ id: String) {
-        guard let session = activeSession, let unit = currentComparison, unit.assetIDs.contains(id),
+        guard !isDeleting, let session = activeSession, session.status == .swiping,
+              let unit = currentComparison, unit.assetIDs.contains(id),
               session.workPlan != nil else { return }
         let previous = session.draftDeleteIDs
         var drafts = previous
@@ -307,6 +311,8 @@ final class AppModel {
     var reviewSelectedIDs: Set<String> {
         Set(activeSession?.reviewSelectedIDs ?? [])
     }
+
+    var canEditReview: Bool { !isDeleting && activeSession?.status == .reviewing }
 
     var isPartialAccess: Bool { permission == .limited }
 
@@ -409,7 +415,7 @@ final class AppModel {
             try reconcileSessionState(purgeMissingDecisions: permission == .full)
             try refreshDecisionCache()
             try loadCachedLocations()
-            let cachedResults = try repository.cachedAnalysis(for: assets)
+            let cachedResults = try repository.cachedAnalysis(for: assets, purgeMissing: permission == .full)
             // Keep valid existing sets visible during matching so a foreground
             // refresh does not temporarily hide Similar Photos or move its scroll anchor.
             similarClusters = similarClusters.filter { cluster in
@@ -454,6 +460,7 @@ final class AppModel {
     }
 
     func beginSelectedCleanup() {
+        guard !isDeleting else { return }
         guard activeSession == nil else {
             resumeSession()
             return
@@ -479,7 +486,7 @@ final class AppModel {
     }
 
     func resumeSession() {
-        guard let session = activeSession else { return }
+        guard !isDeleting, let session = activeSession else { return }
         switch session.status {
         case .swiping: routeCurrentWorkUnit()
         case .reviewing:
@@ -494,7 +501,7 @@ final class AppModel {
     }
 
     func discardActiveSession() async {
-        guard let session = activeSession else { return }
+        guard !isDeleting, let session = activeSession, session.status != .deleting else { return }
         do {
             try repository.discard(session: session)
             try refreshDecisionCache()
@@ -591,7 +598,7 @@ final class AppModel {
     }
 
     func toggleReviewSelection(_ identifier: String) {
-        guard let session = activeSession,
+        guard canEditReview, let session = activeSession,
               reviewCandidateIDs.contains(identifier),
               assetIndex[identifier] != nil else { return }
         let isSelected = !session.reviewSelectedIDs.contains(identifier)
@@ -608,7 +615,7 @@ final class AppModel {
     }
 
     func selectAllForDeletion() {
-        guard let session = activeSession else { return }
+        guard canEditReview, let session = activeSession else { return }
         do {
             try repository.updateReviewSelection(
                 session: session,
@@ -622,7 +629,7 @@ final class AppModel {
     }
 
     func keepAllFromReview() {
-        guard let session = activeSession else { return }
+        guard canEditReview, let session = activeSession else { return }
         do {
             try repository.updateReviewSelection(session: session, candidateIDs: reviewCandidateIDs, selectedIDs: [])
             try refreshDecisionCache()
@@ -632,7 +639,7 @@ final class AppModel {
     }
 
     func undoLastSwipeFromReview() {
-        guard let session = activeSession, session.status == .reviewing, session.cursor > 0 else { return }
+        guard canEditReview, let session = activeSession, session.cursor > 0 else { return }
         do {
             let applied = actions.filter(\.isApplied)
             session.status = .swiping
@@ -649,7 +656,7 @@ final class AppModel {
     }
 
     func commitDeletion() async {
-        guard let session = activeSession else { return }
+        guard canEditReview, let session = activeSession else { return }
         let sessionID = session.identifier
         let fullyReviewed = session.cursor >= session.orderedAssetIDs.count
         let selected = session.reviewSelectedIDs
@@ -666,6 +673,7 @@ final class AppModel {
         }
 
         let estimatedBytes = selected.isEmpty ? [:] : await photoLibrary.estimateStorageBytes(for: selected)
+        guard activeSession?.identifier == sessionID, session.status == .deleting else { return }
         if !selected.isEmpty {
             do {
                 let deletedIdentifiers = try await photoLibrary.deleteAssets(with: selected)
@@ -735,7 +743,7 @@ final class AppModel {
 
     @discardableResult
     func resetHistory() async -> Bool {
-        guard activeSession?.status != .deleting else {
+        guard !isDeleting, activeSession?.status != .deleting else {
             errorMessage = String(localized: "Cleanup history cannot be reset while a deletion is being reconciled.")
             return false
         }
@@ -1213,16 +1221,34 @@ final class AppModel {
 
     private func preheatAroundCurrentAsset() {
         guard let session = activeSession else { return }
+        guard currentComparison == nil else {
+            // The comparison view supplies its actual display-pixel tile size.
+            previewProvider.stopCachingAll()
+            return
+        }
         let lower = max(0, session.cursor - 1)
         let upper = min(session.orderedAssetIDs.count, session.cursor + 4)
         guard lower < upper else { return }
         previewProvider.startCaching(
             identifiers: Array(session.orderedAssetIDs[lower..<upper]),
-            targetSize: CGSize(width: 900, height: 1200)
+            targetSize: PreviewImageConfiguration.cardTargetSize,
+            kind: .active
+        )
+    }
+
+    func preheatComparison(targetSize: CGSize) {
+        guard permission.canRead, route == .similarComparison,
+              activeSession?.status == .swiping, let unit = currentComparison else { return }
+        previewProvider.startCaching(
+            identifiers: Array((unit.assetIDs + unit.contextAssetIDs).prefix(12)),
+            targetSize: targetSize,
+            kind: .comparison
         )
     }
 
     private func reconcileSessionState(purgeMissingDecisions: Bool) throws {
+        // Only crash recovery may change the submitted selection of a deleting session.
+        guard !isDeleting, activeSession?.status != .deleting else { return }
         let accessible = Set(assets.map(\.id))
         if purgeMissingDecisions {
             let staleDecisions = Set(try repository.allDecisions().keys).subtracting(accessible)
@@ -1282,7 +1308,7 @@ final class AppModel {
     }
 
     private func recoverDeletingSessionIfPossible() async throws {
-        guard permission == .full,
+        guard !isDeleting, permission == .full,
               let session = activeSession,
               session.status == .deleting else { return }
 

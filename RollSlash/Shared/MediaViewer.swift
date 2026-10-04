@@ -161,6 +161,8 @@ struct MediaViewer: View {
                 VideoPlayer(player: player)
                     .accessibilityLabel("Video preview")
                     .onAppear { player.play() }
+            } else if failed {
+                unavailablePreview
             } else {
                 loading
             }
@@ -173,17 +175,21 @@ struct MediaViewer: View {
             ZoomableImage(image: image, zoomScale: $zoomScale, onDismissSwipe: onDismissSwipe,
                           dismissSwipeAxis: dismissSwipeAxis)
         } else if failed {
-            ContentUnavailableView {
-                Label("Preview unavailable", systemImage: "icloud.slash")
-            } description: {
-                Text("The item may still be in iCloud.")
-            } actions: {
-                Button("Retry") { retryCount += 1 }
-            }
-            .foregroundStyle(.white)
+            unavailablePreview
         } else {
             loading
         }
+    }
+
+    private var unavailablePreview: some View {
+        ContentUnavailableView {
+            Label("Preview unavailable", systemImage: "icloud.slash")
+        } description: {
+            Text("The item may still be in iCloud.")
+        } actions: {
+            Button("Retry") { retryCount += 1 }
+        }
+        .foregroundStyle(.white)
     }
 
     private var loading: some View {
@@ -308,6 +314,7 @@ struct MediaViewer: View {
                 player = newPlayer
                 newPlayer.play()
             }
+            failed = player == nil
             let detailedImage = await appModel.previewProvider.image(for: identifier, targetSize: target, kind: .active)
             guard isCurrent(generation) else { return }
             if let detailedImage {
@@ -333,7 +340,7 @@ struct MediaViewer: View {
             guard isCurrent(generation) else { return }
             livePhoto = motion
         }
-        failed = image == nil && livePhoto == nil && player == nil
+        failed = asset.mediaKind == .video ? player == nil : image == nil && livePhoto == nil
     }
 
     private func isCurrent(_ generation: UUID) -> Bool {

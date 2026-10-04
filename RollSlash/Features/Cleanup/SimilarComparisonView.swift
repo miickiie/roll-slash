@@ -3,6 +3,7 @@ import SwiftUI
 struct SimilarComparisonView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.displayScale) private var displayScale
     @State private var preview: ComparisonPreview?
     @State private var isSubmitting = false
 
@@ -10,6 +11,11 @@ struct SimilarComparisonView: View {
         NavigationStack {
             GeometryReader { geometry in
                 let tileWidth = max(1, (geometry.size.width - 32 - 12) / 2)
+                let cacheRequest = ComparisonCacheRequest(
+                    identifiers: Array(((appModel.currentComparison?.assetIDs ?? [])
+                        + (appModel.currentComparison?.contextAssetIDs ?? [])).prefix(12)),
+                    pixels: (tileWidth * displayScale).rounded(.up)
+                )
                 VStack(spacing: 0) {
                     ScrollView {
                         Text("Select the photos to delete. Unselected photos will be kept.")
@@ -31,6 +37,10 @@ struct SimilarComparisonView: View {
                     .accessibilityIdentifier("comparison-grid-scroll")
                     if !dynamicTypeSize.isAccessibilitySize { historyControls }
                     ProgressView(value: Double(appModel.sessionCompleted), total: Double(max(1, appModel.sessionTotal)))
+                }
+                .task(id: cacheRequest) {
+                    guard !Task.isCancelled else { return }
+                    appModel.preheatComparison(targetSize: CGSize(width: cacheRequest.pixels, height: cacheRequest.pixels))
                 }
             }
             .navigationTitle("Similar Photos")
@@ -153,6 +163,11 @@ struct SimilarComparisonView: View {
 private struct ComparisonPreview: Identifiable {
     let id: String
     let unit: CleanupWorkUnit
+}
+
+private struct ComparisonCacheRequest: Hashable {
+    let identifiers: [String]
+    let pixels: CGFloat
 }
 
 private struct ComparisonPhotoImage: View {

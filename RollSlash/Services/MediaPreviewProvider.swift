@@ -3,7 +3,7 @@ import Photos
 import PhotosUI
 import UIKit
 
-enum PreviewRequestKind: Sendable {
+enum PreviewRequestKind: Sendable, Equatable {
     case thumbnail
     case active
     case comparison
@@ -12,6 +12,8 @@ enum PreviewRequestKind: Sendable {
 
 /// Keeps sizing, network policy, and final-quality delivery consistent across previews.
 struct PreviewImageConfiguration {
+    static let cardTargetSize = CGSize(width: 900, height: 1200)
+
     let targetSize: CGSize
     let contentMode: PHImageContentMode
     let options: PHImageRequestOptions
@@ -26,6 +28,25 @@ struct PreviewImageConfiguration {
         options.resizeMode = kind == .fullResolution ? .none : .fast
         options.isNetworkAccessAllowed = kind == .active || kind == .fullResolution
     }
+}
+
+/// Changes to an asset version or its display size cancel and replace the view's request.
+struct PreviewImageRequest: Hashable {
+    let identifier: String?
+    let modificationDate: Date?
+    let pixelWidth: CGFloat
+    let pixelHeight: CGFloat
+    let retryCount: Int
+
+    init(identifier: String?, modificationDate: Date?, targetSize: CGSize, retryCount: Int = 0) {
+        self.identifier = identifier
+        self.modificationDate = modificationDate
+        pixelWidth = targetSize.width
+        pixelHeight = targetSize.height
+        self.retryCount = retryCount
+    }
+
+    var targetSize: CGSize { CGSize(width: pixelWidth, height: pixelHeight) }
 }
 
 @MainActor
@@ -60,7 +81,7 @@ protocol MediaPreviewProvider: AnyObject {
     func livePhoto(for identifier: String, targetSize: CGSize) async -> PHLivePhoto?
     func playerItem(for identifier: String) async -> AVPlayerItem?
     func shareableVideoURL(for identifier: String) async throws -> URL?
-    func startCaching(identifiers: [String], targetSize: CGSize)
+    func startCaching(identifiers: [String], targetSize: CGSize, kind: PreviewRequestKind)
     func stopCachingAll()
 }
 
@@ -68,7 +89,8 @@ protocol MediaPreviewProvider: AnyObject {
 final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
     private let manager = PHCachingImageManager()
     private var cachedAssets: [String: PHAsset] = [:]
-    private var cachedTargetSize: CGSize?
+    private var cachedConfiguration: PreviewImageConfiguration?
+    private var cachedKind: PreviewRequestKind?
 
     func image(for identifier: String, targetSize: CGSize, kind: PreviewRequestKind) async -> UIImage? {
         guard let asset = asset(for: identifier) else { return nil }
@@ -151,23 +173,25 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
         }
     }
 
-    func startCaching(identifiers: [String], targetSize: CGSize) {
-        let options = cachingOptions()
-        if let cachedTargetSize, cachedTargetSize != targetSize {
+    func startCaching(identifiers: [String], targetSize: CGSize, kind: PreviewRequestKind) {
+        let configuration = PreviewImageConfiguration(kind: kind, targetSize: targetSize)
+        if let previous = cachedConfiguration,
+           previous.targetSize != configuration.targetSize || cachedKind != kind {
             manager.stopCachingImages(
-                for: Array(cachedAssets.values), targetSize: cachedTargetSize,
-                contentMode: .aspectFit, options: options
+                for: Array(cachedAssets.values), targetSize: previous.targetSize,
+                contentMode: previous.contentMode, options: previous.options
             )
             cachedAssets.removeAll()
         }
-        cachedTargetSize = targetSize
+        cachedConfiguration = configuration
+        cachedKind = kind
 
         let requested = Set(identifiers)
         let removed = cachedAssets.filter { !requested.contains($0.key) }
         if !removed.isEmpty {
             manager.stopCachingImages(
-                for: Array(removed.values), targetSize: targetSize,
-                contentMode: .aspectFit, options: options
+                for: Array(removed.values), targetSize: configuration.targetSize,
+                contentMode: configuration.contentMode, options: configuration.options
             )
             removed.keys.forEach { cachedAssets.removeValue(forKey: $0) }
         }
@@ -181,22 +205,16 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
             added.append(asset)
         }
         manager.startCachingImages(
-            for: added, targetSize: targetSize, contentMode: .aspectFit, options: options
+            for: added, targetSize: configuration.targetSize,
+            contentMode: configuration.contentMode, options: configuration.options
         )
     }
 
     func stopCachingAll() {
         manager.stopCachingImagesForAllAssets()
         cachedAssets.removeAll()
-        cachedTargetSize = nil
-    }
-
-    private func cachingOptions() -> PHImageRequestOptions {
-        let options = PHImageRequestOptions()
-        options.deliveryMode = .highQualityFormat
-        options.resizeMode = .fast
-        options.isNetworkAccessAllowed = true
-        return options
+        cachedConfiguration = nil
+        cachedKind = nil
     }
 
     private func asset(for identifier: String) -> PHAsset? {

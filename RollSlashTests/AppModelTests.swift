@@ -132,6 +132,75 @@ struct AppModelTests {
         #expect(harness.model.route == .completion)
     }
 
+    @Test("live deletion remains locked through refresh and review mutations", arguments: [false, true])
+    func liveDeletionIsLocked(suspendAtDeletion: Bool) async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let february = try #require(harness.model.monthGroups.first { $0.key.value == "2026-02" })
+        harness.model.toggleSelection(february)
+        harness.model.beginSelectedCleanup()
+        await harness.model.decide(.deletePending)
+        let session = try #require(harness.model.activeSession)
+        harness.client.suspendEstimates = !suspendAtDeletion
+        harness.client.suspendDeletions = suspendAtDeletion
+        let commit = Task { await harness.model.commitDeletion() }
+        await harness.client.waitForSuspendedOperation()
+
+        await harness.model.refreshAuthorization()
+        #expect(session.status == .deleting)
+        #expect(!harness.model.canEditReview)
+        harness.model.toggleReviewSelection("feb")
+        harness.model.keepAllFromReview()
+        harness.model.selectAllForDeletion()
+        harness.model.undoLastSwipeFromReview()
+        await harness.model.discardActiveSession()
+        let reset = await harness.model.resetHistory()
+        #expect(!reset)
+        await harness.model.commitDeletion()
+        #expect(harness.model.isDeleting)
+        #expect(harness.model.activeSession?.identifier == session.identifier)
+        #expect(session.reviewSelectedIDs == ["feb"])
+        #expect(harness.model.decisionsByAssetID["feb"] == .deletePending)
+
+        harness.client.resumeOperation()
+        await commit.value
+        #expect(!harness.model.isDeleting)
+        #expect(harness.model.activeSession == nil)
+        #expect(harness.client.deletedIdentifiers == ["feb"])
+        #expect(harness.client.deletionCallCount == 1)
+        #expect(harness.model.route == .completion)
+    }
+
+    @Test("limited access preserves a submitted deletion until full-access recovery")
+    func limitedDeletionRecovery() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let february = try #require(harness.model.monthGroups.first { $0.key.value == "2026-02" })
+        harness.model.toggleSelection(february)
+        harness.model.beginSelectedCleanup()
+        await harness.model.decide(.deletePending)
+        let session = try #require(harness.model.activeSession)
+        session.status = .deleting
+        let fullLibrary = harness.client.assets
+        harness.client.permission = .limited
+        harness.client.assets.removeAll { $0.id == "feb" }
+
+        await harness.model.refreshAuthorization()
+        await harness.model.discardActiveSession()
+        #expect(session.status == .deleting)
+        #expect(session.reviewSelectedIDs == ["feb"])
+        #expect(session.orderedAssetIDs == ["feb"])
+        #expect(harness.model.activeSession?.identifier == session.identifier)
+
+        harness.client.permission = .full
+        harness.client.assets = fullLibrary
+        await harness.model.refreshAuthorization()
+        #expect(session.status == .reviewing)
+        #expect(harness.model.reviewSelectedIDs == ["feb"])
+        #expect(harness.model.canEditReview)
+        #expect(harness.client.deletionCallCount == 0)
+    }
+
     @Test("permission changes refresh and clear inaccessible dashboard state")
     func permissionRefresh() async throws {
         let harness = try makeHarness()
@@ -466,6 +535,11 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
     var deletionResultOverride: Set<String>?
     var permission: PhotoPermission = .full
     var suspendFetches = false
+    var suspendEstimates = false
+    var suspendDeletions = false
+    var deletionCallCount = 0
+    private var pendingOperation: CheckedContinuation<Void, Never>?
+    private var operationWaiters: [CheckedContinuation<Void, Never>] = []
     private var pendingFetches: [CheckedContinuation<[PhotoAssetDescriptor], Never>] = []
     private var pendingCountWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
 
@@ -496,12 +570,35 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
     }
     func deleteAssets(with identifiers: [String]) async throws -> Set<String> {
         if shouldFailDeletion { throw TestError.deletionFailed }
+        deletionCallCount += 1
+        if suspendDeletions { await suspendOperation() }
         deletedIdentifiers = identifiers
         let available = Set(assets.map(\.id))
         let deleted = Set(identifiers).intersection(available)
         let result = deletionResultOverride ?? deleted
         assets.removeAll { result.contains($0.id) }
         return result
+    }
+    func estimateStorageBytes(for identifiers: [String]) async -> [String: Int64] {
+        if suspendEstimates { await suspendOperation() }
+        return [:]
+    }
+    private func suspendOperation() async {
+        await withCheckedContinuation { continuation in
+            pendingOperation = continuation
+            operationWaiters.forEach { $0.resume() }
+            operationWaiters.removeAll()
+        }
+    }
+    func waitForSuspendedOperation() async {
+        if pendingOperation != nil { return }
+        await withCheckedContinuation { operationWaiters.append($0) }
+    }
+    func resumeOperation() {
+        suspendEstimates = false
+        suspendDeletions = false
+        pendingOperation?.resume()
+        pendingOperation = nil
     }
     func isFavorite(with identifier: String) async -> Bool { false }
     func setFavorite(_ favorite: Bool, for identifier: String) async throws {}
@@ -515,7 +612,7 @@ private final class TestPreviewProvider: MediaPreviewProvider {
     func livePhoto(for identifier: String, targetSize: CGSize) async -> PHLivePhoto? { nil }
     func playerItem(for identifier: String) async -> AVPlayerItem? { nil }
     func shareableVideoURL(for identifier: String) async throws -> URL? { nil }
-    func startCaching(identifiers: [String], targetSize: CGSize) {}
+    func startCaching(identifiers: [String], targetSize: CGSize, kind: PreviewRequestKind) {}
     func stopCachingAll() {}
 }
 

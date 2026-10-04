@@ -124,7 +124,7 @@ final class DemoMediaPreviewProvider: MediaPreviewProvider {
     func livePhoto(for identifier: String, targetSize: CGSize) async -> PHLivePhoto? { nil }
     func playerItem(for identifier: String) async -> AVPlayerItem? { nil }
     func shareableVideoURL(for identifier: String) async throws -> URL? { nil }
-    func startCaching(identifiers: [String], targetSize: CGSize) {}
+    func startCaching(identifiers: [String], targetSize: CGSize, kind: PreviewRequestKind) {}
     func stopCachingAll() {}
 }
 

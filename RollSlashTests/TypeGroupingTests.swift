@@ -220,6 +220,54 @@ struct TypeGroupingTests {
         #expect(harness.model.similarClusters.isEmpty)
     }
 
+    @Test("full to limited to full access restores cached analysis without rescanning")
+    func limitedAccessAnalysisCache() async throws {
+        let service = CountingCachedAnalysis()
+        let harness = try makeHarness(analysis: service)
+        let repository = SwiftDataCleanupRepository(container: harness.container)
+        let fullLibrary = harness.library.assets
+        for asset in fullLibrary where asset.mediaKind != .video {
+            try repository.cacheAnalysis(TypeFixtureAnalysis.result, for: asset)
+        }
+        await harness.model.start()
+        harness.model.grouping = .type
+        try await awaitAnalysis(harness.model)
+
+        harness.library.permission = .limited
+        harness.library.assets.removeAll { $0.id == "b" }
+        await harness.model.refreshAuthorization()
+        try await awaitAnalysis(harness.model)
+        #expect(harness.model.analysisResults["b"] == nil)
+        #expect(harness.model.similarClusters.isEmpty)
+
+        harness.library.permission = .full
+        harness.library.assets = fullLibrary
+        await harness.model.refreshAuthorization()
+        try await awaitAnalysis(harness.model)
+        #expect(harness.model.analysisResults["b"] == TypeFixtureAnalysis.result)
+        #expect(harness.model.similarClusters.first?.assetIDs == ["a", "b"])
+        #expect(await service.analyzedIDs.isEmpty)
+    }
+
+    @Test("partial cache reads retain hidden records for upsert and full reads purge removed assets")
+    func partialCacheUpsertAndPurge() throws {
+        let harness = try makeHarness()
+        let repository = SwiftDataCleanupRepository(container: harness.container)
+        let a = makeAsset("a"), b = makeAsset("b")
+        try repository.cacheAnalysis(TypeFixtureAnalysis.result, for: a)
+        try repository.cacheAnalysis(TypeFixtureAnalysis.result, for: b)
+        #expect(try repository.cachedAnalysis(for: [a], purgeMissing: false).keys.sorted() == ["a"])
+        var updated = TypeFixtureAnalysis.result
+        updated.isLarge = false
+        try repository.cacheAnalysis(updated, for: b)
+        let restored = SwiftDataCleanupRepository(container: harness.container)
+        #expect(try restored.cachedAnalysis(for: [a, b])["b"] == updated)
+        let records = try ModelContext(harness.container).fetch(FetchDescriptor<MediaAnalysisCacheRecord>())
+        #expect(records.count == 2)
+        _ = try restored.cachedAnalysis(for: [a], purgeMissing: true)
+        #expect(try restored.cachedAnalysis(for: [a, b])["b"] == nil)
+    }
+
     @Test("unavailable media remains retryable and similarity capability failures are visible")
     func unavailableAnalysis() async throws {
         let service = TypeFixtureAnalysis(unavailable: true)
@@ -550,6 +598,17 @@ private struct TypeFixtureAnalysis: MediaAnalysisClient {
     func clusters(assets: [PhotoAssetDescriptor], results: [String: MediaAnalysisResult]) async -> [SimilarPhotoCluster] {
         let ids = assets.filter { $0.mediaKind != .video && results[$0.id]?.featurePrint != nil }.map(\.id).sorted()
         return ids.count > 1 ? [SimilarPhotoCluster(id: "fixture", assetIDs: ids)] : []
+    }
+}
+
+private actor CountingCachedAnalysis: MediaAnalysisClient {
+    private(set) var analyzedIDs: [String] = []
+    func analyze(_ asset: PhotoAssetDescriptor) async -> MediaAnalysisResult {
+        analyzedIDs.append(asset.id)
+        return TypeFixtureAnalysis.result
+    }
+    func clusters(assets: [PhotoAssetDescriptor], results: [String: MediaAnalysisResult]) async -> [SimilarPhotoCluster] {
+        await TypeFixtureAnalysis().clusters(assets: assets, results: results)
     }
 }
 

@@ -96,7 +96,7 @@ struct ReviewView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(selectedIDs.isEmpty ? RollSlashTheme.violet : RollSlashTheme.coral)
-                .disabled(appModel.isDeleting)
+                .disabled(!appModel.canEditReview)
                 .accessibilityIdentifier("commit-deletion")
                 .padding()
                 .background(.ultraThinMaterial)
@@ -104,6 +104,7 @@ struct ReviewView: View {
             .fullScreenCover(item: $focusedPreview) { item in
                 ReviewMediaViewer(initialIdentifier: item.id, initialImage: item.image)
             }
+            .disabled(!appModel.canEditReview)
             .alert("Deletion did not complete", isPresented: Binding(
                 get: { appModel.errorMessage != nil },
                 set: { if !$0 { appModel.errorMessage = nil } }

@@ -11,6 +11,11 @@ struct MediaThumbnailView: View {
     @State private var loadFailed = false
 
     var body: some View {
+        let request = PreviewImageRequest(
+            identifier: identifier,
+            modificationDate: identifier.flatMap { appModel.assetIndex[$0]?.modificationDate },
+            targetSize: CGSize(width: size.width * displayScale, height: size.height * displayScale)
+        )
         ZStack {
             Rectangle().fill(.quaternary)
             if let image {
@@ -30,16 +35,14 @@ struct MediaThumbnailView: View {
             }
         }
         .clipped()
-        .task(id: identifier) {
+        .task(id: request) {
             image = nil
             loadFailed = false
-            guard let identifier else {
-                onImageLoaded?(nil)
-                return
-            }
+            onImageLoaded?(nil)
+            guard let identifier = request.identifier else { return }
             let loadedImage = await appModel.previewProvider.image(
                 for: identifier,
-                targetSize: CGSize(width: size.width * displayScale, height: size.height * displayScale),
+                targetSize: request.targetSize,
                 kind: .thumbnail
             )
             guard !Task.isCancelled else { return }

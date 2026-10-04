@@ -437,9 +437,12 @@ struct MediaCardView: View {
     @State private var isMuted = true
     @State private var failed = false
     @State private var isVisible = false
+    @State private var retryCount = 0
 
     var body: some View {
-        GeometryReader { proxy in
+        let request = PreviewImageRequest(identifier: asset.id, modificationDate: asset.modificationDate,
+                                          targetSize: PreviewImageConfiguration.cardTargetSize, retryCount: retryCount)
+        GeometryReader { _ in
             ZStack {
                 Color.black
                 media
@@ -449,7 +452,7 @@ struct MediaCardView: View {
                     } description: {
                         Text("The item may still be in iCloud.")
                     } actions: {
-                        Button("Retry") { Task { await load(size: proxy.size) } }
+                        Button("Retry") { retryCount += 1 }
                     }
                     .foregroundStyle(.white)
                 }
@@ -485,7 +488,7 @@ struct MediaCardView: View {
                 .padding(14)
             }
             .clipShape(.rect(cornerRadius: 30))
-            .task(id: asset.id) { await load(size: proxy.size) }
+            .task(id: request) { await load(request: request) }
             .onAppear {
                 isVisible = true
                 if asset.mediaKind == .video && !isPreviewOpen { player?.play() }
@@ -581,9 +584,14 @@ struct MediaCardView: View {
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 
-    private func load(size: CGSize) async {
+    private func load(request: PreviewImageRequest) async {
+        player?.pause()
+        player = nil
+        image = nil
+        livePhoto = nil
+        isLivePlaying = false
         failed = false
-        let target = CGSize(width: 900, height: 1200)
+        let target = request.targetSize
         switch asset.mediaKind {
         case .photo, .livePhoto:
             let loadedImage = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active)
@@ -595,8 +603,9 @@ struct MediaCardView: View {
                 livePhoto = loadedLivePhoto
             }
         case .video:
-            if let item = await appModel.previewProvider.playerItem(for: asset.id) {
-                guard !Task.isCancelled else { return }
+            let item = await appModel.previewProvider.playerItem(for: asset.id)
+            guard !Task.isCancelled else { return }
+            if let item {
                 let player = AVPlayer(playerItem: item)
                 player.isMuted = isMuted
                 self.player = player
