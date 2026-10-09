@@ -51,6 +51,25 @@ struct ViewerPreviewTests {
         }
     }
 
+    @Test func degradedLiveResultsWaitForTheFinalValue() async {
+        let result = await PreviewImageDelivery.finalResult { handler in
+            handler("degraded", [PHImageResultIsDegradedKey: true])
+            handler("final", [PHImageResultIsDegradedKey: false])
+            handler("late", nil)
+            return 1
+        } cancel: { _ in }
+        #expect(result == "final")
+    }
+
+    @Test func failedLiveResultFinishesWithoutWaiting() async {
+        let result = await PreviewImageDelivery.finalResult { handler in
+            handler("nope", [PHImageErrorKey: NSError(domain: "test", code: 1), PHImageResultIsDegradedKey: true])
+            handler("late", nil)
+            return 1
+        } cancel: { _ in }
+        #expect(result == nil)
+    }
+
     @Test func failedOrUnavailableOriginalFinishesWithoutAnImage() async {
         let cases: [[AnyHashable: Any]?] = [nil, [PHImageCancelledKey: true],
             [PHImageErrorKey: NSError(domain: "test", code: 1), PHImageResultIsDegradedKey: true]]

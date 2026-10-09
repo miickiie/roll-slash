@@ -194,6 +194,25 @@ struct RepositoryTests {
         #expect(session.unit(at: 1)?.unit == unit)
     }
 
+    @Test("a new session replaces an abandoned swipe and refuses to hide a deletion")
+    func createSessionReplacesAbandonedSwipeOnly() throws {
+        let repository = SwiftDataCleanupRepository(container: try makeContainer())
+        let abandoned = try repository.createSession(groupKind: .month, selectedGroupKeys: [], orderedAssetIDs: ["a"])
+        _ = try repository.recordDecision(session: abandoned, assetIdentifier: "a", decision: .keep)
+        let replacement = try repository.createSession(groupKind: .month, selectedGroupKeys: [], orderedAssetIDs: ["b"])
+        #expect(try repository.activeSession()?.identifier == replacement.identifier)
+        #expect(try repository.actions(for: abandoned.identifier).isEmpty)
+        #expect(try repository.decision(for: "a") == nil)
+
+        replacement.status = .deleting
+        try repository.save()
+        #expect(throws: CleanupStoreError.self) {
+            try repository.createSession(groupKind: .month, selectedGroupKeys: [], orderedAssetIDs: ["c"])
+        }
+        #expect(try repository.activeSession()?.identifier == replacement.identifier)
+        #expect(try repository.actions(for: replacement.identifier).isEmpty)
+    }
+
     private func makeContainer() throws -> ModelContainer {
         return try ModelContainer(
             for: RollSlashSchema.schema,

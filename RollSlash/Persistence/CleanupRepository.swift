@@ -1,6 +1,15 @@
 import Foundation
 import SwiftData
 
+struct CleanupStoreError: LocalizedError, Equatable {
+    static let deletionInProgress = CleanupStoreError(
+        message: String(localized: "Roll Slash is still confirming a deletion. Finish that before starting another cleanup.")
+    )
+
+    let message: String
+    var errorDescription: String? { message }
+}
+
 @MainActor
 protocol CleanupRepository: AnyObject {
     func allDecisions() throws -> [String: AssetDecision]
@@ -78,8 +87,14 @@ final class SwiftDataCleanupRepository: CleanupRepository {
     }
 
     func removeDecisions(for assetIdentifiers: Set<String>) throws {
-        let records = try context.fetch(FetchDescriptor<AssetDecisionRecord>())
-        records.filter { assetIdentifiers.contains($0.assetIdentifier) }.forEach(context.delete)
+        guard !assetIdentifiers.isEmpty else { return }
+        for chunk in Array(assetIdentifiers).chunks(of: 200) {
+            let identifiers = chunk
+            let descriptor = FetchDescriptor<AssetDecisionRecord>(
+                predicate: #Predicate { identifiers.contains($0.assetIdentifier) }
+            )
+            try context.fetch(descriptor).forEach(context.delete)
+        }
         try context.save()
     }
 
@@ -90,6 +105,13 @@ final class SwiftDataCleanupRepository: CleanupRepository {
     }
 
     func createSession(groupKind: GroupKind, selectedGroupKeys: [String], orderedAssetIDs: [String], workPlan: CleanupWorkPlan? = nil) throws -> CleanupSessionRecord {
+        let existingSessions = try context.fetch(FetchDescriptor<CleanupSessionRecord>())
+        if existingSessions.contains(where: { $0.status == .deleting }) {
+            throw CleanupStoreError.deletionInProgress
+        }
+        for session in existingSessions {
+            try discard(session: session)
+        }
         let existingDecisions = try allDecisions()
         let baselines = orderedAssetIDs.map {
             SessionDecisionBaseline(assetIdentifier: $0, decision: existingDecisions[$0])
@@ -328,11 +350,18 @@ final class SwiftDataCleanupRepository: CleanupRepository {
 
     func cachedLocations(for bucketKeys: Set<String>, localeIdentifier: String) throws -> [String: ResolvedLocation] {
         guard !bucketKeys.isEmpty else { return [:] }
-        let records = try context.fetch(FetchDescriptor<LocationCacheRecord>())
-        return Dictionary(uniqueKeysWithValues: records.compactMap { record in
-            guard bucketKeys.contains(record.bucketKey), record.localeIdentifier == localeIdentifier else { return nil }
-            return (record.bucketKey, record.location)
-        })
+        let locale = localeIdentifier
+        var matched: [String: ResolvedLocation] = [:]
+        for chunk in Array(bucketKeys).chunks(of: 200) {
+            let keys = chunk
+            let descriptor = FetchDescriptor<LocationCacheRecord>(
+                predicate: #Predicate { keys.contains($0.bucketKey) && $0.localeIdentifier == locale }
+            )
+            for record in try context.fetch(descriptor) {
+                matched[record.bucketKey] = record.location
+            }
+        }
+        return matched
     }
 
     func cacheLocation(_ location: ResolvedLocation, for bucketKey: String) throws {
@@ -360,5 +389,20 @@ final class SwiftDataCleanupRepository: CleanupRepository {
         try context.delete(model: CleanupSessionRecord.self)
         try context.delete(model: GroupCompletionRecord.self)
         try context.save()
+    }
+}
+
+private extension Array {
+    func chunks(of size: Int) -> [[Element]] {
+        guard size > 0, !isEmpty else { return isEmpty ? [] : [self] }
+        var result: [[Element]] = []
+        result.reserveCapacity((count + size - 1) / size)
+        var index = startIndex
+        while index < endIndex {
+            let next = self.index(index, offsetBy: size, limitedBy: endIndex) ?? endIndex
+            result.append(Array(self[index..<next]))
+            index = next
+        }
+        return result
     }
 }

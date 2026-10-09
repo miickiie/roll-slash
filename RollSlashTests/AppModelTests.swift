@@ -9,6 +9,22 @@ import UIKit
 @MainActor
 @Suite("Cleanup flow")
 struct AppModelTests {
+    @Test("horizontal swipes commit and vertical drags do not")
+    func swipeCommitRules() {
+        #expect(CleanupSwipe.decision(translation: CGSize(width: 120, height: 10), predictedEnd: CGSize(width: 120, height: 10)) == .keep)
+        #expect(CleanupSwipe.decision(translation: CGSize(width: -120, height: 10), predictedEnd: CGSize(width: -120, height: 10)) == .deletePending)
+        #expect(CleanupSwipe.decision(translation: CGSize(width: 80, height: 140), predictedEnd: CGSize(width: 200, height: 20)) == nil)
+        #expect(CleanupSwipe.decision(translation: CGSize(width: 40, height: 8), predictedEnd: CGSize(width: 180, height: 8)) == .keep)
+        #expect(CleanupSwipe.decision(translation: CGSize(width: 10, height: 0), predictedEnd: CGSize(width: 220, height: 0)) == nil)
+    }
+
+    @Test("comparison context copy distinguishes keep, delete, and photos outside this cleanup")
+    func comparisonContextCopy() {
+        #expect(ComparisonContextCopy.label(for: .deletePending) == String(localized: "Previously marked to delete"))
+        #expect(ComparisonContextCopy.label(for: .keep) == String(localized: "Previously kept"))
+        #expect(ComparisonContextCopy.label(for: nil) == String(localized: "Not in this cleanup"))
+    }
+
     @Test("undo, redo, and branch replacement keep counts consistent")
     func undoRedo() async throws {
         let harness = try makeHarness()
@@ -199,6 +215,27 @@ struct AppModelTests {
         #expect(harness.model.reviewSelectedIDs == ["feb"])
         #expect(harness.model.canEditReview)
         #expect(harness.client.deletionCallCount == 0)
+    }
+
+    @Test("returning to the foreground skips an unchanged library and favoriting does not reload mid-cleanup")
+    func foregroundAndFavoriteSkipFullReload() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let fetches = harness.client.fetchCallCount
+        await harness.model.refreshForForeground()
+        #expect(harness.client.fetchCallCount == fetches)
+
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+        try await harness.model.setFavorite(true, for: "jan-new")
+        #expect(harness.model.assetIndex["jan-new"]?.isFavorite == true)
+        #expect(harness.client.fetchCallCount == fetches)
+        #expect(harness.model.route == .cleanup)
+
+        await harness.model.refreshForForeground()
+        #expect(harness.client.fetchCallCount == fetches + 1)
+        #expect(harness.model.assetIndex["jan-new"]?.isFavorite == true)
     }
 
     @Test("permission changes refresh and clear inaccessible dashboard state")
@@ -550,7 +587,10 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
 
     func authorizationStatus() -> PhotoPermission { permission }
     func requestAuthorization() async -> PhotoPermission { permission }
+    private(set) var fetchCallCount = 0
+
     func fetchAssets() async throws -> [PhotoAssetDescriptor] {
+        fetchCallCount += 1
         if suspendFetches {
             return await withCheckedContinuation { continuation in
                 pendingFetches.append(continuation)
@@ -601,7 +641,12 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
         pendingOperation = nil
     }
     func isFavorite(with identifier: String) async -> Bool { false }
-    func setFavorite(_ favorite: Bool, for identifier: String) async throws {}
+    func setFavorite(_ favorite: Bool, for identifier: String) async throws {
+        if let index = assets.firstIndex(where: { $0.id == identifier }) {
+            assets[index].isFavorite = favorite
+        }
+        onLibraryChange?()
+    }
     func presentLimitedLibraryPicker() {}
     func openSystemSettings() {}
 }

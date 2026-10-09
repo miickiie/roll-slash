@@ -23,7 +23,7 @@ struct RootView: View {
             }
         }
         .visibleSystemStatusBar()
-        .preferredColorScheme(appModel.route == .cleanup ? .dark : nil)
+        .preferredColorScheme(appModel.route == .cleanup || appModel.route == .similarComparison ? .dark : nil)
         .animation(.snappy, value: appModel.route)
         .task {
             await appModel.start()
@@ -31,7 +31,7 @@ struct RootView: View {
         .onChange(of: scenePhase) { _, phase in
             appModel.setForeground(phase == .active)
             guard phase == .active else { return }
-            Task { await appModel.refreshAuthorization() }
+            Task { await appModel.refreshForForeground() }
         }
     }
 }

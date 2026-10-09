@@ -106,7 +106,6 @@ struct MediaGroup: Identifiable, Hashable, Sendable {
     var unresolvedCount: Int
     var thumbnailAssetID: String?
     var isCleaned: Bool
-    var sortDate: Date?
 
     var id: String { key.id }
     var totalCount: Int { assetIDs.count }

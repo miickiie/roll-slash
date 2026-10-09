@@ -73,6 +73,29 @@ enum PreviewImageDelivery {
         for await image in stream { return Task.isCancelled ? nil : image }
         return nil
     }
+
+    /// Waits for PhotoKit's final callback. Degraded frames stay open until the finished image, an error, or cancellation.
+    static func finalResult<Value: Sendable>(
+        start: (@escaping @Sendable (Value?, [AnyHashable: Any]?) -> Void) -> PHImageRequestID,
+        cancel: @escaping @MainActor @Sendable (PHImageRequestID) -> Void
+    ) async -> Value? {
+        guard !Task.isCancelled else { return nil }
+        let stream = AsyncStream<Value?> { continuation in
+            let requestID = start { value, info in
+                let cancelled = info?[PHImageCancelledKey] as? Bool == true
+                let error = info?[PHImageErrorKey] != nil
+                let degraded = info?[PHImageResultIsDegradedKey] as? Bool == true
+                if !cancelled && !error && degraded { return }
+                continuation.yield(cancelled || error ? nil : value)
+                continuation.finish()
+            }
+            continuation.onTermination = { @Sendable _ in
+                Task { @MainActor in cancel(requestID) }
+            }
+        }
+        for await value in stream { return Task.isCancelled ? nil : value }
+        return nil
+    }
 }
 
 @MainActor
@@ -83,25 +106,39 @@ protocol MediaPreviewProvider: AnyObject {
     func shareableVideoURL(for identifier: String) async throws -> URL?
     func startCaching(identifiers: [String], targetSize: CGSize, kind: PreviewRequestKind)
     func stopCachingAll()
+    func invalidateCachedImages()
+}
+
+extension MediaPreviewProvider {
+    func invalidateCachedImages() {}
 }
 
 @MainActor
 final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
     private let manager = PHCachingImageManager()
     private var cachedAssets: [String: PHAsset] = [:]
+    private var resolvedAssets: [String: PHAsset] = [:]
+    private var renderedImages: [String: UIImage] = [:]
+    private var renderedOrder: [String] = []
+    private var renderedBytes = 0
     private var cachedConfiguration: PreviewImageConfiguration?
     private var cachedKind: PreviewRequestKind?
+    private let renderedByteLimit = 48 * 1024 * 1024
 
     func image(for identifier: String, targetSize: CGSize, kind: PreviewRequestKind) async -> UIImage? {
-        guard let asset = asset(for: identifier) else { return nil }
         let configuration = PreviewImageConfiguration(kind: kind, targetSize: targetSize)
-        return await PreviewImageDelivery.image(kind: kind) { handler in
+        let key = cacheKey(identifier: identifier, kind: kind, targetSize: configuration.targetSize)
+        if kind != .fullResolution, let cached = renderedImages[key] { return cached }
+        guard let asset = asset(for: identifier) else { return nil }
+        let image = await PreviewImageDelivery.image(kind: kind) { handler in
             manager.requestImage(for: asset, targetSize: configuration.targetSize,
                                  contentMode: configuration.contentMode, options: configuration.options,
                                  resultHandler: handler)
         } cancel: { [manager] requestID in
             manager.cancelImageRequest(requestID)
         }
+        if let image, kind != .fullResolution { storeRendered(image, for: key) }
+        return image
     }
 
     func livePhoto(for identifier: String, targetSize: CGSize) async -> PHLivePhoto? {
@@ -109,17 +146,11 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
         let options = PHLivePhotoRequestOptions()
         options.deliveryMode = .highQualityFormat
         options.isNetworkAccessAllowed = true
-        let stream = AsyncStream<PHLivePhoto?> { continuation in
-            let requestID = manager.requestLivePhoto(for: asset, targetSize: targetSize, contentMode: .aspectFit, options: options) { photo, _ in
-                continuation.yield(photo)
-                continuation.finish()
-            }
-            continuation.onTermination = { @Sendable [weak self] _ in
-                Task { @MainActor in self?.manager.cancelImageRequest(requestID) }
-            }
+        return await PreviewImageDelivery.finalResult { handler in
+            manager.requestLivePhoto(for: asset, targetSize: targetSize, contentMode: .aspectFit, options: options, resultHandler: handler)
+        } cancel: { [manager] requestID in
+            manager.cancelImageRequest(requestID)
         }
-        for await photo in stream { return photo }
-        return nil
     }
 
     func playerItem(for identifier: String) async -> AVPlayerItem? {
@@ -127,17 +158,11 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
         let options = PHVideoRequestOptions()
         options.deliveryMode = .automatic
         options.isNetworkAccessAllowed = true
-        let stream = AsyncStream<AVPlayerItem?> { continuation in
-            let requestID = manager.requestPlayerItem(forVideo: asset, options: options) { item, _ in
-                continuation.yield(item)
-                continuation.finish()
-            }
-            continuation.onTermination = { @Sendable [weak self] _ in
-                Task { @MainActor in self?.manager.cancelImageRequest(requestID) }
-            }
+        return await PreviewImageDelivery.finalResult { handler in
+            manager.requestPlayerItem(forVideo: asset, options: options, resultHandler: handler)
+        } cancel: { [manager] requestID in
+            manager.cancelImageRequest(requestID)
         }
-        for await item in stream { return item }
-        return nil
     }
 
     func shareableVideoURL(for identifier: String) async throws -> URL? {
@@ -202,6 +227,7 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
         var added: [PHAsset] = []
         result.enumerateObjects { asset, _, _ in
             self.cachedAssets[asset.localIdentifier] = asset
+            self.rememberResolved(asset)
             added.append(asset)
         }
         manager.startCachingImages(
@@ -215,10 +241,57 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
         cachedAssets.removeAll()
         cachedConfiguration = nil
         cachedKind = nil
+        invalidateCachedImages()
+    }
+
+    func invalidateCachedImages() {
+        renderedImages.removeAll()
+        renderedOrder.removeAll()
+        renderedBytes = 0
+        resolvedAssets.removeAll()
     }
 
     private func asset(for identifier: String) -> PHAsset? {
-        PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject
+        if let cached = cachedAssets[identifier] ?? resolvedAssets[identifier] { return cached }
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject else { return nil }
+        rememberResolved(asset)
+        return asset
+    }
+
+    private func rememberResolved(_ asset: PHAsset) {
+        let identifier = asset.localIdentifier
+        if resolvedAssets[identifier] == nil, resolvedAssets.count >= 256, let oldest = resolvedAssets.keys.first {
+            resolvedAssets.removeValue(forKey: oldest)
+        }
+        resolvedAssets[identifier] = asset
+    }
+
+    private func cacheKey(identifier: String, kind: PreviewRequestKind, targetSize: CGSize) -> String {
+        "\(identifier)|\(kind)|\(Int(targetSize.width.rounded()))x\(Int(targetSize.height.rounded()))"
+    }
+
+    private func storeRendered(_ image: UIImage, for key: String) {
+        let cost = renderedCost(image)
+        guard cost > 0, cost <= renderedByteLimit / 4 else { return }
+        if let existing = renderedImages[key] {
+            renderedBytes -= renderedCost(existing)
+        } else {
+            renderedOrder.append(key)
+        }
+        renderedImages[key] = image
+        renderedBytes += cost
+        while renderedBytes > renderedByteLimit, let oldest = renderedOrder.first {
+            renderedOrder.removeFirst()
+            if let removed = renderedImages.removeValue(forKey: oldest) {
+                renderedBytes -= renderedCost(removed)
+            }
+        }
+        if renderedBytes < 0 { renderedBytes = 0 }
+    }
+
+    private func renderedCost(_ image: UIImage) -> Int {
+        let pixels = image.size.width * image.size.height * image.scale * image.scale
+        return Int(pixels * 4)
     }
 }
 

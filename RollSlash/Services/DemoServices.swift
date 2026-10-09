@@ -65,10 +65,24 @@ final class DemoPhotoLibraryClient: PhotoLibraryClient {
 @MainActor
 final class DemoMediaPreviewProvider: MediaPreviewProvider {
     let comparisonFixtures: Bool
+    private var renderedImages: [String: UIImage] = [:]
 
     init(comparisonFixtures: Bool = false) { self.comparisonFixtures = comparisonFixtures }
 
     func image(for identifier: String, targetSize: CGSize, kind: PreviewRequestKind) async -> UIImage? {
+        let cacheKey = "\(identifier)|\(kind)|\(Int(targetSize.width.rounded()))x\(Int(targetSize.height.rounded()))"
+        if kind != .fullResolution, let cached = renderedImages[cacheKey] { return cached }
+        let rendered = renderImage(for: identifier, targetSize: targetSize, kind: kind)
+        if kind != .fullResolution {
+            if renderedImages.count >= 48 { renderedImages.removeAll() }
+            renderedImages[cacheKey] = rendered
+        }
+        return rendered
+    }
+
+    func invalidateCachedImages() { renderedImages.removeAll() }
+
+    private func renderImage(for identifier: String, targetSize: CGSize, kind: PreviewRequestKind) -> UIImage {
         let boundedSize: CGSize
         let ordinal = Int(identifier.split(separator: "-").last ?? "0") ?? 0
         if comparisonFixtures {
@@ -125,7 +139,7 @@ final class DemoMediaPreviewProvider: MediaPreviewProvider {
     func playerItem(for identifier: String) async -> AVPlayerItem? { nil }
     func shareableVideoURL(for identifier: String) async throws -> URL? { nil }
     func startCaching(identifiers: [String], targetSize: CGSize, kind: PreviewRequestKind) {}
-    func stopCachingAll() {}
+    func stopCachingAll() { renderedImages.removeAll() }
 }
 
 struct DemoLocationResolver: LocationResolver {

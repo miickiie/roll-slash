@@ -6,6 +6,7 @@ import UIKit
 final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
     var onLibraryChange: (@MainActor @Sendable () -> Void)?
     private var isObservingChanges = false
+    private var selfieIDs: Set<String>?
 
     override init() {
         super.init()
@@ -34,13 +35,14 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
 
     func fetchAssets() async throws -> [PhotoAssetDescriptor] {
         guard authorizationStatus().canRead else { return [] }
-        return await Task.detached(priority: .userInitiated) {
+        let knownSelfieIDs = selfieIDs
+        let fetched = await Task.detached(priority: .userInitiated) { () -> (assets: [PhotoAssetDescriptor], selfieIDs: Set<String>, resolvedSelfies: Bool) in
             let collections = PHAssetCollection.fetchAssetCollections(
                 with: .smartAlbum,
                 subtype: .smartAlbumUserLibrary,
                 options: nil
             )
-            guard let library = collections.firstObject else { return [] }
+            guard let library = collections.firstObject else { return ([], [], false) }
 
             let options = PHFetchOptions()
             options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
@@ -48,12 +50,18 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
             options.includeAllBurstAssets = true
 
             let fetchResult = PHAsset.fetchAssets(in: library, options: options)
-            var selfieIDs = Set<String>()
-            let selfieAlbums = PHAssetCollection.fetchAssetCollections(with: .smartAlbum, subtype: .smartAlbumSelfPortraits, options: nil)
-            selfieAlbums.enumerateObjects { album, _, _ in
-                PHAsset.fetchAssets(in: album, options: options).enumerateObjects { asset, _, _ in
-                    if asset.mediaType == .image { selfieIDs.insert(asset.localIdentifier) }
+            let selfieIDs: Set<String>
+            if let knownSelfieIDs {
+                selfieIDs = knownSelfieIDs
+            } else {
+                var collected = Set<String>()
+                let selfieAlbums = PHAssetCollection.fetchAssetCollections(with: .smartAlbum, subtype: .smartAlbumSelfPortraits, options: nil)
+                selfieAlbums.enumerateObjects { album, _, _ in
+                    PHAsset.fetchAssets(in: album, options: options).enumerateObjects { asset, _, _ in
+                        if asset.mediaType == .image { collected.insert(asset.localIdentifier) }
+                    }
                 }
+                selfieIDs = collected
             }
             var descriptors: [PhotoAssetDescriptor] = []
             descriptors.reserveCapacity(fetchResult.count)
@@ -83,21 +91,25 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
                     isSelfie: selfieIDs.contains(asset.localIdentifier)
                 ))
             }
-            return descriptors
-    }.value
+            return (descriptors, selfieIDs, true)
+        }.value
+        if knownSelfieIDs == nil, fetched.resolvedSelfies {
+            selfieIDs = fetched.selfieIDs
+        }
+        return fetched.assets
     }
 
     func estimateStorageBytes(for identifiers: [String]) async -> [String: Int64] {
+        let identifiers = identifiers
         return await Task.detached(priority: .utility) {
             guard #available(iOS 27, *) else { return [:] }
+            guard !identifiers.isEmpty else { return [:] }
 
+            let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
             var estimates: [String: Int64] = [:]
-            for identifier in identifiers {
-                let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil)
-                guard let asset = fetchResult.firstObject else { continue }
+            fetchResult.enumerateObjects { asset, _, _ in
                 let resources = PHAssetResource.assetResources(for: asset)
-                guard !resources.isEmpty else { continue }
-
+                guard !resources.isEmpty else { return }
                 var total: Int64 = 0
                 var isComplete = true
                 for resource in resources {
@@ -107,7 +119,7 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
                     }
                     total += Int64(resourceBytes)
                 }
-                if isComplete { estimates[identifier] = total }
+                if isComplete { estimates[asset.localIdentifier] = total }
             }
             return estimates
         }.value
@@ -203,6 +215,7 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
 extension PhotoKitLibraryClient: PHPhotoLibraryChangeObserver {
     nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
         Task { @MainActor [weak self] in
+            self?.selfieIDs = nil
             self?.onLibraryChange?()
         }
     }

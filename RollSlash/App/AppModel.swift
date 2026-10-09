@@ -25,9 +25,20 @@ private final class CleanupMetricsStore {
         var estimatedBytes: Int64?
     }
 
+    private struct FoldedTotals: Codable {
+        var itemCount = 0
+        var estimatedStorageBytes: Int64 = 0
+        var unavailableEstimateCount = 0
+    }
+
     private static let storageKey = "roll-slash.cleanup-metrics.v1"
+    private static let foldedKey = "roll-slash.cleanup-metrics.folded.v1"
+    private static let stagedKey = "roll-slash.cleanup-metrics.staged.v1"
+    private static let sessionLimit = 40
     private let defaults: UserDefaults?
     private var entries: [String: [String: Entry]]
+    private var folded = FoldedTotals()
+    private var staged: [String: [String: Int64]]
 
     init() {
         let process = ProcessInfo.processInfo
@@ -40,45 +51,120 @@ private final class CleanupMetricsStore {
         } else {
             entries = [:]
         }
+        if let data = defaults?.data(forKey: Self.foldedKey),
+           let savedFolded = try? JSONDecoder().decode(FoldedTotals.self, from: data) {
+            folded = savedFolded
+        }
+        if let data = defaults?.data(forKey: Self.stagedKey),
+           let savedStaged = try? JSONDecoder().decode([String: [String: Int64]].self, from: data) {
+            staged = savedStaged
+        } else {
+            staged = [:]
+        }
+    }
+
+    /// Remembers byte estimates before Photos deletion so a crash during deletion can still report them.
+    func stage(sessionID: UUID, ids: [String], estimatedBytes: [String: Int64]) {
+        let sessionKey = sessionID.uuidString
+        var bucket = staged[sessionKey] ?? [:]
+        var changed = false
+        for id in Set(ids) {
+            guard let bytes = estimatedBytes[id] else { continue }
+            let assetKey = Self.assetKey(for: id)
+            if bucket[assetKey] != bytes {
+                bucket[assetKey] = bytes
+                changed = true
+            }
+        }
+        guard changed else { return }
+        staged[sessionKey] = bucket
+        saveStaged()
+    }
+
+    func clearStage(sessionID: UUID) {
+        guard staged.removeValue(forKey: sessionID.uuidString) != nil else { return }
+        saveStaged()
     }
 
     func record(sessionID: UUID, ids: [String], estimatedBytes: [String: Int64]) {
         let sessionKey = sessionID.uuidString
+        let stagedBytes = staged[sessionKey] ?? [:]
         var changed = false
         for id in Set(ids) {
             let assetKey = Self.assetKey(for: id)
+            let estimate = estimatedBytes[id] ?? stagedBytes[assetKey]
             if let existing = entries[sessionKey]?[assetKey] {
-                if existing.estimatedBytes == nil, let estimate = estimatedBytes[id] {
+                if existing.estimatedBytes == nil, let estimate {
                     entries[sessionKey, default: [:]][assetKey] = Entry(estimatedBytes: estimate)
                     changed = true
                 }
             } else {
-                entries[sessionKey, default: [:]][assetKey] = Entry(estimatedBytes: estimatedBytes[id])
+                entries[sessionKey, default: [:]][assetKey] = Entry(estimatedBytes: estimate)
                 changed = true
             }
         }
-        if changed, let data = try? JSONEncoder().encode(entries) {
-            defaults?.set(data, forKey: Self.storageKey)
-        }
+        if staged.removeValue(forKey: sessionKey) != nil { changed = true }
+        guard changed else { return }
+        prune(keeping: sessionKey)
+        saveEntries()
+        saveStaged()
     }
 
     func summary(for sessionID: UUID? = nil) -> CleanupMetricsSummary {
         let selectedEntries: [Entry]
         if let sessionID {
             selectedEntries = entries[sessionID.uuidString].map { Array($0.values) } ?? []
-        } else {
-            selectedEntries = entries.values.flatMap { $0.values }
+            return CleanupMetricsSummary(
+                itemCount: selectedEntries.count,
+                estimatedStorageBytes: selectedEntries.compactMap(\.estimatedBytes).reduce(0, +),
+                unavailableEstimateCount: selectedEntries.filter { $0.estimatedBytes == nil }.count
+            )
         }
+        selectedEntries = entries.values.flatMap(\.values)
         return CleanupMetricsSummary(
-            itemCount: selectedEntries.count,
-            estimatedStorageBytes: selectedEntries.compactMap(\.estimatedBytes).reduce(0, +),
-            unavailableEstimateCount: selectedEntries.filter { $0.estimatedBytes == nil }.count
+            itemCount: selectedEntries.count + folded.itemCount,
+            estimatedStorageBytes: selectedEntries.compactMap(\.estimatedBytes).reduce(folded.estimatedStorageBytes, +),
+            unavailableEstimateCount: selectedEntries.filter { $0.estimatedBytes == nil }.count + folded.unavailableEstimateCount
         )
     }
 
     func reset() {
         entries.removeAll()
+        folded = FoldedTotals()
+        staged.removeAll()
         defaults?.removeObject(forKey: Self.storageKey)
+        defaults?.removeObject(forKey: Self.foldedKey)
+        defaults?.removeObject(forKey: Self.stagedKey)
+    }
+
+    private func prune(keeping sessionKey: String) {
+        let overflow = entries.count - Self.sessionLimit
+        guard overflow > 0 else { return }
+        for key in entries.keys.filter({ $0 != sessionKey }).prefix(overflow) {
+            guard let removed = entries.removeValue(forKey: key) else { continue }
+            folded.itemCount += removed.count
+            folded.estimatedStorageBytes += removed.values.compactMap(\.estimatedBytes).reduce(0, +)
+            folded.unavailableEstimateCount += removed.values.filter { $0.estimatedBytes == nil }.count
+        }
+    }
+
+    private func saveEntries() {
+        guard let defaults else { return }
+        if let data = try? JSONEncoder().encode(entries) {
+            defaults.set(data, forKey: Self.storageKey)
+        }
+        if let data = try? JSONEncoder().encode(folded) {
+            defaults.set(data, forKey: Self.foldedKey)
+        }
+    }
+
+    private func saveStaged() {
+        guard let defaults else { return }
+        if staged.isEmpty {
+            defaults.removeObject(forKey: Self.stagedKey)
+        } else if let data = try? JSONEncoder().encode(staged) {
+            defaults.set(data, forKey: Self.stagedKey)
+        }
     }
 
     private static func assetKey(for identifier: String) -> String {
@@ -181,6 +267,8 @@ final class AppModel {
     @ObservationIgnored private var locationResolutionTask: Task<Void, Never>?
     @ObservationIgnored private var libraryReloadGeneration = 0
     @ObservationIgnored private var groupBuildGeneration = 0
+    @ObservationIgnored private var localPhotoChangeDepth = 0
+    @ObservationIgnored private var libraryChangeCoalesced = false
 
     init(
         photoLibrary: any PhotoLibraryClient,
@@ -321,7 +409,30 @@ final class AppModel {
     }
 
     func setFavorite(_ favorite: Bool, for identifier: String) async throws {
+        // PhotoKit reports our own favorite change as a library update. Applying it
+        // locally avoids rebuilding the whole library in the middle of a swipe.
+        localPhotoChangeDepth += 1
+        defer {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(1500))
+                guard let self else { return }
+                self.localPhotoChangeDepth = max(0, self.localPhotoChangeDepth - 1)
+            }
+        }
         try await photoLibrary.setFavorite(favorite, for: identifier)
+        applyLocalFavorite(favorite, identifier: identifier)
+        if permission.canRead {
+            try? await rebuildGroupsOffMain()
+        }
+    }
+
+    private func applyLocalFavorite(_ favorite: Bool, identifier: String) {
+        guard var asset = assetIndex[identifier] else { return }
+        asset.isFavorite = favorite
+        assetIndex[identifier] = asset
+        if let index = assets.firstIndex(where: { $0.id == identifier }) {
+            assets[index] = asset
+        }
     }
 
     func start() async {
@@ -329,6 +440,10 @@ final class AppModel {
         hasStarted = true
         photoLibrary.onLibraryChange = { [weak self] in
             guard let self, !self.isDeleting else { return }
+            if self.localPhotoChangeDepth > 0 {
+                self.libraryChangeCoalesced = true
+                return
+            }
             Task { await self.reloadLibrary() }
         }
         permission = photoLibrary.authorizationStatus()
@@ -361,6 +476,17 @@ final class AppModel {
             libraryReloadGeneration += 1
             isLoading = false
         }
+    }
+
+    /// Re-checks Photos access when the app becomes active. Library edits still arrive through PhotoKit's change observer.
+    func refreshForForeground() async {
+        guard hasStarted else { return }
+        let current = photoLibrary.authorizationStatus()
+        let authorizationChanged = current != permission
+        let needsInitialLoad = current.canRead && assets.isEmpty && !isLoading
+        guard authorizationChanged || needsInitialLoad || libraryChangeCoalesced else { return }
+        libraryChangeCoalesced = false
+        await refreshAuthorization()
     }
 
     func refreshAuthorization() async {
@@ -409,6 +535,7 @@ final class AppModel {
             guard generation == libraryReloadGeneration, permission.canRead else { return }
             assets = fetchedAssets
             assetIndex = Dictionary(uniqueKeysWithValues: fetchedAssets.map { ($0.id, $0) })
+            previewProvider.invalidateCachedImages()
             try refreshDecisionCache()
             try await recoverDeletingSessionIfPossible()
             guard generation == libraryReloadGeneration, permission.canRead else { return }
@@ -432,9 +559,11 @@ final class AppModel {
             guard generation == libraryReloadGeneration, permission.canRead else { return }
             let clusters = await analysisClient.clusters(assets: assets, results: analysisResults)
             guard generation == libraryReloadGeneration, permission.canRead else { return }
-            similarClusters = clusters
-            try await rebuildGroupsOffMain(expectedReloadGeneration: generation)
-            guard generation == libraryReloadGeneration, permission.canRead else { return }
+            if clusters != similarClusters {
+                similarClusters = clusters
+                try await rebuildGroupsOffMain(expectedReloadGeneration: generation)
+                guard generation == libraryReloadGeneration, permission.canRead else { return }
+            }
             isLoading = false
             if grouping == .location { resolveMissingLocations() }
             if grouping == .type { startTypeAnalysis() }
@@ -444,6 +573,7 @@ final class AppModel {
                 await finishSwiping()
             } else if route == .cleanup || route == .similarComparison {
                 routeCurrentWorkUnit()
+                preheatAroundCurrentAsset()
             }
         } catch {
             if generation == libraryReloadGeneration { errorMessage = error.localizedDescription }
@@ -648,7 +778,6 @@ final class AppModel {
                 candidateIDs: applied.map(\.assetIdentifier),
                 selectedIDs: Set(applied.filter { $0.decision == .deletePending }.map(\.assetIdentifier))
             )
-            route = .cleanup
             undo()
         } catch {
             errorMessage = error.localizedDescription
@@ -674,6 +803,7 @@ final class AppModel {
 
         let estimatedBytes = selected.isEmpty ? [:] : await photoLibrary.estimateStorageBytes(for: selected)
         guard activeSession?.identifier == sessionID, session.status == .deleting else { return }
+        cleanupMetricsStore.stage(sessionID: sessionID, ids: selected, estimatedBytes: estimatedBytes)
         if !selected.isEmpty {
             do {
                 let deletedIdentifiers = try await photoLibrary.deleteAssets(with: selected)
@@ -687,6 +817,7 @@ final class AppModel {
                 lifetimeCleanupSummary = cleanupMetricsStore.summary()
             } catch {
                 guard activeSession?.identifier == sessionID else { return }
+                cleanupMetricsStore.clearStage(sessionID: sessionID)
                 session.status = .reviewing
                 do {
                     try repository.save()
@@ -873,7 +1004,7 @@ final class AppModel {
             let unresolved = members.filter { decisions[$0.id] == nil }.count
             return MediaGroup(key: category.key, title: category.title, subtitle: itemCountText(members.count),
                               assetIDs: members.map(\.id), unresolvedCount: unresolved,
-                              thumbnailAssetID: members.first?.id, isCleaned: unresolved == 0, sortDate: nil)
+                              thumbnailAssetID: members.first?.id, isCleaned: unresolved == 0)
         }
     }
 
@@ -1059,8 +1190,7 @@ final class AppModel {
                 assetIDs: values.map(\.id),
                 unresolvedCount: unresolved,
                 thumbnailAssetID: values.first?.id,
-                isCleaned: !values.isEmpty && unresolved == 0,
-                sortDate: values.compactMap(\.creationDate).max()
+                isCleaned: !values.isEmpty && unresolved == 0
             )
         }
         let currentKeys = Set(groups.map(\.key.id))
@@ -1073,8 +1203,7 @@ final class AppModel {
                 assetIDs: [],
                 unresolvedCount: 0,
                 thumbnailAssetID: nil,
-                isCleaned: true,
-                sortDate: nil
+                isCleaned: true
             ))
         }
         return groups.sorted {
@@ -1133,8 +1262,7 @@ final class AppModel {
                 assetIDs: items.map(\.id),
                 unresolvedCount: unresolved,
                 thumbnailAssetID: items.first?.id,
-                isCleaned: !items.isEmpty && unresolved == 0,
-                sortDate: nil
+                isCleaned: !items.isEmpty && unresolved == 0
             )
         }
 
@@ -1148,8 +1276,7 @@ final class AppModel {
                 assetIDs: [],
                 unresolvedCount: 0,
                 thumbnailAssetID: nil,
-                isCleaned: true,
-                sortDate: nil
+                isCleaned: true
             ))
         }
         return groups.sorted {
@@ -1221,11 +1348,7 @@ final class AppModel {
 
     private func preheatAroundCurrentAsset() {
         guard let session = activeSession else { return }
-        guard currentComparison == nil else {
-            // The comparison view supplies its actual display-pixel tile size.
-            previewProvider.stopCachingAll()
-            return
-        }
+        guard currentComparison == nil else { return }
         let lower = max(0, session.cursor - 1)
         let upper = min(session.orderedAssetIDs.count, session.cursor + 4)
         guard lower < upper else { return }

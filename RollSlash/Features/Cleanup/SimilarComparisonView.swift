@@ -49,6 +49,7 @@ struct SimilarComparisonView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { appModel.route = .dashboard }
                         .disabled(isSubmitting)
+                        .accessibilityHint("Pauses this session. Your progress stays on the dashboard.")
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -82,6 +83,7 @@ struct SimilarComparisonView: View {
             } message: { Text(appModel.errorMessage ?? "") }
         }
         .visibleSystemStatusBar()
+        .sensoryFeedback(.selection, trigger: appModel.comparisonDeleteIDs)
     }
 
     private var historyControls: some View {
@@ -140,7 +142,7 @@ struct SimilarComparisonView: View {
                 .accessibilityIdentifier("comparison-delete-\(asset.id)")
                 .accessibilityValue(selected ? "Selected to delete" : "Not selected to delete")
             } else {
-                Text(appModel.decisionsByAssetID[asset.id] == .deletePending ? "Previously marked to delete" : "Previously kept")
+                Text(ComparisonContextCopy.label(for: appModel.decisionsByAssetID[asset.id]))
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -157,6 +159,16 @@ struct SimilarComparisonView: View {
         guard !isSubmitting else { return }
         isSubmitting = true
         Task { await operation(); isSubmitting = false }
+    }
+}
+
+enum ComparisonContextCopy {
+    static func label(for decision: AssetDecision?) -> String {
+        switch decision {
+        case .deletePending: String(localized: "Previously marked to delete")
+        case .keep: String(localized: "Previously kept")
+        case nil: String(localized: "Not in this cleanup")
+        }
     }
 }
 
@@ -193,7 +205,7 @@ private struct ComparisonPhotoImage: View {
                 Image(uiImage: image).resizable().scaledToFit()
                     .frame(width: width, height: width)
             } else if loaded {
-                Label("Open to load photo", systemImage: "icloud.and.arrow.down")
+                Label("In iCloud — open to load", systemImage: "icloud.and.arrow.down")
                     .font(.caption).foregroundStyle(.secondary).padding(8)
             } else {
                 ProgressView()
@@ -313,8 +325,7 @@ private struct SimilarComparisonPreview: View {
                     .accessibilityValue(selected ? "Selected to delete" : "Not selected to delete")
                     .accessibilityHint("Saves this choice for Confirm Choices. No photo is deleted yet.")
                 } else {
-                    Text(appModel.decisionsByAssetID[currentIdentifier] == .deletePending
-                         ? "Previously marked to delete" : "Previously kept")
+                    Text(ComparisonContextCopy.label(for: appModel.decisionsByAssetID[currentIdentifier]))
                         .font(.subheadline).multilineTextAlignment(.center)
                         .accessibilityIdentifier("comparison-viewer-read-only")
                 }
