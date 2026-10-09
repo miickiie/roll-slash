@@ -114,6 +114,7 @@ struct DashboardView: View {
     private var content: some View {
         VStack(spacing: 0) {
             DashboardHeader(actionID: mascotActionID)
+                .zIndex(1)
             if !appModel.permission.canRead {
                 PermissionEmptyState()
             } else {
@@ -207,7 +208,7 @@ private struct DashboardHeader: View {
     let actionID: Int
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .center, spacing: 14) {
             Text("Roll Slash")
                 .font(.largeTitle.bold())
                 .accessibilityAddTraits(.isHeader)
@@ -225,7 +226,9 @@ private struct RollSlashMascot: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let actionID: Int
     @State private var isBobbing = false
-    @State private var isSlashing = false
+    @State private var pose: MascotPose = .rest
+    @State private var dustProgress: CGFloat = 1
+    @State private var actionTask: Task<Void, Never>?
 
     var body: some View {
         ZStack {
@@ -237,10 +240,19 @@ private struct RollSlashMascot: View {
                         endPoint: .bottomTrailing
                     )
                 )
-            CatHeadAndPaw(isBobbing: isBobbing, isSlashing: isSlashing)
-            Duster(isSlashing: isSlashing)
+            Circle()
+                .stroke(.white.opacity(pose == .swipe ? 0.95 : 0), lineWidth: pose == .swipe ? 3 : 1)
+                .scaleEffect(pose == .swipe ? 1.18 : 0.86)
+            CatFace(pose: pose, isBobbing: isBobbing && pose == .rest)
+            DustBurst(progress: dustProgress)
+            CatPaw(pose: pose)
+            Duster(pose: pose)
         }
-        .frame(width: 36, height: 36)
+        .frame(width: 56, height: 56)
+        .scaleEffect(pose.scale, anchor: .leading)
+        .rotationEffect(.degrees(pose.lean))
+        .offset(pose.shift)
+        .shadow(color: RollSlashTheme.violet.opacity(pose == .swipe ? 0.4 : 0), radius: pose == .swipe ? 12 : 0, y: 5)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Roll Slash mascot, cat with an animated paw and feather duster")
         .onAppear {
@@ -249,79 +261,359 @@ private struct RollSlashMascot: View {
                 isBobbing = true
             }
         }
+        .onDisappear { actionTask?.cancel() }
         .onChange(of: actionID) { _, _ in
-            guard !reduceMotion else { return }
-            withAnimation(.spring(response: 0.2, dampingFraction: 0.55)) {
-                isSlashing.toggle()
+            playSlash()
+        }
+    }
+
+    private func playSlash() {
+        guard !reduceMotion else { return }
+        actionTask?.cancel()
+        actionTask = Task { @MainActor in
+            withAnimation(.spring(response: 0.16, dampingFraction: 0.82)) {
+                pose = .windup
+            }
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+            var reset = Transaction()
+            reset.disablesAnimations = true
+            withTransaction(reset) { dustProgress = 0 }
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.46)) {
+                pose = .swipe
+            }
+            withAnimation(.easeOut(duration: 0.55)) {
+                dustProgress = 1
+            }
+            try? await Task.sleep(for: .milliseconds(420))
+            guard !Task.isCancelled else { return }
+            withAnimation(.spring(response: 0.46, dampingFraction: 0.62)) {
+                pose = .rest
             }
         }
     }
 }
 
-private struct CatHeadAndPaw: View {
+private enum MascotPose: Equatable {
+    case rest
+    case windup
+    case swipe
+
+    var scale: CGFloat {
+        switch self {
+        case .rest: 1
+        case .windup: 0.88
+        case .swipe: 1.38
+        }
+    }
+
+    var lean: Double {
+        switch self {
+        case .rest: 0
+        case .windup: -18
+        case .swipe: 20
+        }
+    }
+
+    var shift: CGSize {
+        switch self {
+        case .rest: .zero
+        case .windup: CGSize(width: -6, height: 5)
+        case .swipe: CGSize(width: 10, height: -14)
+        }
+    }
+
+    var pawAngle: Double {
+        switch self {
+        case .rest: -18
+        case .windup: -82
+        case .swipe: 48
+        }
+    }
+
+    var pawShift: CGSize {
+        switch self {
+        case .rest: CGSize(width: 14, height: 14)
+        case .windup: CGSize(width: 1, height: -4)
+        case .swipe: CGSize(width: 24, height: 18)
+        }
+    }
+
+    var dusterAngle: Double {
+        switch self {
+        case .rest: -24
+        case .windup: -88
+        case .swipe: 56
+        }
+    }
+
+    var dusterShift: CGSize {
+        switch self {
+        case .rest: CGSize(width: 20, height: 12)
+        case .windup: CGSize(width: -4, height: -10)
+        case .swipe: CGSize(width: 26, height: 6)
+        }
+    }
+}
+
+private enum MascotPalette {
+    static let fur = Color(red: 0.992, green: 0.914, blue: 0.227)
+    static let ear = Color(red: 1.0, green: 0.576, blue: 0.145)
+    static let mouth = Color(red: 0.984, green: 0.369, blue: 0.514)
+    static let eye = Color(red: 0.122, green: 0.024, blue: 0.0)
+    static let paw = Color(red: 0.961, green: 0.588, blue: 0.165)
+    static let dustLight = Color(red: 0.678, green: 0.980, blue: 0.906)
+    static let dust = Color(red: 0.373, green: 0.922, blue: 0.808)
+    static let dustDeep = Color(red: 0.247, green: 0.851, blue: 0.780)
+    static let handle = Color(red: 0.055, green: 0.490, blue: 0.490)
+}
+
+private struct CatFace: View {
+    let pose: MascotPose
     let isBobbing: Bool
-    let isSlashing: Bool
 
     var body: some View {
         ZStack {
-            Path { path in
-                path.move(to: CGPoint(x: 6, y: 11))
-                path.addLine(to: CGPoint(x: 8, y: 3))
-                path.addLine(to: CGPoint(x: 14, y: 9))
-                path.closeSubpath()
+            CatHeadSilhouette()
+                .fill(MascotPalette.fur)
+            CatInnerEarShape(leading: true)
+                .fill(MascotPalette.ear)
+            CatInnerEarShape(leading: false)
+                .fill(MascotPalette.ear)
+            HStack(spacing: 9) {
+                CatEye(squinting: pose == .swipe, wide: pose == .windup)
+                CatEye(squinting: pose == .swipe, wide: pose == .windup)
             }
-            .fill(.yellow)
-            .offset(x: -2, y: isBobbing ? 0 : 2)
-            Path { path in
-                path.move(to: CGPoint(x: 16, y: 9))
-                path.addLine(to: CGPoint(x: 22, y: 3))
-                path.addLine(to: CGPoint(x: 25, y: 11))
-                path.closeSubpath()
-            }
-            .fill(.yellow)
-            .offset(x: -2, y: isBobbing ? 0 : 2)
-            Capsule()
-                .fill(.yellow)
-                .frame(width: 21, height: 18)
-                .overlay {
-                    HStack(spacing: 5) {
-                        Circle().fill(.black).frame(width: 2, height: 2)
-                        Circle().fill(.black).frame(width: 2, height: 2)
-                    }
-                    .offset(y: -1)
-                }
-                .overlay(alignment: .bottom) {
-                    Capsule()
-                        .fill(.pink.opacity(0.9))
-                        .frame(width: 4, height: 2)
-                        .offset(y: -3)
-                }
-                .offset(x: -5, y: isBobbing ? -2 : 0)
-            Image(systemName: "pawprint.fill")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(.orange)
-                .rotationEffect(.degrees(isSlashing ? -35 : -12))
-                .offset(x: 5, y: isSlashing ? 4 : 7)
+            .offset(y: 1)
+            CatMouth(open: pose == .swipe ? 1 : 0)
+                .fill(MascotPalette.mouth)
+                .frame(width: pose == .swipe ? 11 : 9, height: pose == .swipe ? 8 : 6.5)
+                .offset(y: 9)
         }
+        .frame(width: 48, height: 50)
+        .offset(x: -2, y: isBobbing ? -2 : 0)
+        .rotationEffect(.degrees(pose == .windup ? 8 : (pose == .swipe ? -6 : 0)))
+    }
+}
+
+private struct CatHeadSilhouette: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.addEllipse(in: CGRect(x: rect.width * 0.06, y: rect.height * 0.28, width: rect.width * 0.88, height: rect.height * 0.70))
+        path.addPath(ear(in: rect, leading: true))
+        path.addPath(ear(in: rect, leading: false))
+        return path
+    }
+
+    private func ear(in rect: CGRect, leading: Bool) -> Path {
+        let width = rect.width
+        let height = rect.height
+        var path = Path()
+        if leading {
+            path.move(to: CGPoint(x: width * 0.10, y: height * 0.48))
+            path.addCurve(
+                to: CGPoint(x: width * 0.19, y: height * 0.19),
+                control1: CGPoint(x: width * 0.10, y: height * 0.34),
+                control2: CGPoint(x: width * 0.14, y: height * 0.21)
+            )
+            path.addQuadCurve(
+                to: CGPoint(x: width * 0.25, y: height * 0.17),
+                control: CGPoint(x: width * 0.21, y: height * 0.16)
+            )
+            path.addCurve(
+                to: CGPoint(x: width * 0.48, y: height * 0.34),
+                control1: CGPoint(x: width * 0.33, y: height * 0.19),
+                control2: CGPoint(x: width * 0.42, y: height * 0.28)
+            )
+        } else {
+            path.move(to: CGPoint(x: width * 0.52, y: height * 0.34))
+            path.addCurve(
+                to: CGPoint(x: width * 0.75, y: height * 0.17),
+                control1: CGPoint(x: width * 0.58, y: height * 0.28),
+                control2: CGPoint(x: width * 0.67, y: height * 0.19)
+            )
+            path.addQuadCurve(
+                to: CGPoint(x: width * 0.81, y: height * 0.19),
+                control: CGPoint(x: width * 0.79, y: height * 0.16)
+            )
+            path.addCurve(
+                to: CGPoint(x: width * 0.90, y: height * 0.48),
+                control1: CGPoint(x: width * 0.86, y: height * 0.21),
+                control2: CGPoint(x: width * 0.90, y: height * 0.34)
+            )
+        }
+        path.closeSubpath()
+        return path
+    }
+}
+
+private struct CatInnerEarShape: Shape {
+    let leading: Bool
+
+    func path(in rect: CGRect) -> Path {
+        let width = rect.width
+        let height = rect.height
+        var path = Path()
+        if leading {
+            path.move(to: CGPoint(x: width * 0.17, y: height * 0.42))
+            path.addQuadCurve(
+                to: CGPoint(x: width * 0.23, y: height * 0.25),
+                control: CGPoint(x: width * 0.17, y: height * 0.29)
+            )
+            path.addQuadCurve(
+                to: CGPoint(x: width * 0.40, y: height * 0.33),
+                control: CGPoint(x: width * 0.26, y: height * 0.22)
+            )
+        } else {
+            path.move(to: CGPoint(x: width * 0.60, y: height * 0.33))
+            path.addQuadCurve(
+                to: CGPoint(x: width * 0.77, y: height * 0.25),
+                control: CGPoint(x: width * 0.74, y: height * 0.22)
+            )
+            path.addQuadCurve(
+                to: CGPoint(x: width * 0.83, y: height * 0.42),
+                control: CGPoint(x: width * 0.83, y: height * 0.29)
+            )
+        }
+        path.closeSubpath()
+        return path
+    }
+}
+
+private struct CatMouth: Shape {
+    var open: CGFloat
+
+    var animatableData: CGFloat {
+        get { open }
+        set { open = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let upperLeft = rect.minY + rect.height * (0.22 - 0.10 * open)
+        let upperRight = rect.minY + rect.height * (0.08 - 0.04 * open)
+        path.move(to: CGPoint(x: rect.minX + rect.width * 0.10, y: upperLeft))
+        path.addCurve(
+            to: CGPoint(x: rect.minX + rect.width * 0.86, y: upperRight),
+            control1: CGPoint(x: rect.minX + rect.width * 0.42, y: upperLeft + rect.height * 0.04),
+            control2: CGPoint(x: rect.minX + rect.width * 0.70, y: upperRight + rect.height * 0.04)
+        )
+        path.addCurve(
+            to: CGPoint(x: rect.maxX, y: rect.minY + rect.height * 0.22),
+            control1: CGPoint(x: rect.maxX, y: upperRight - rect.height * 0.06),
+            control2: CGPoint(x: rect.maxX, y: rect.minY + rect.height * 0.06)
+        )
+        path.addCurve(
+            to: CGPoint(x: rect.midX, y: rect.maxY),
+            control1: CGPoint(x: rect.maxX, y: rect.minY + rect.height * 0.70),
+            control2: CGPoint(x: rect.minX + rect.width * 0.80, y: rect.maxY)
+        )
+        path.addCurve(
+            to: CGPoint(x: rect.minX, y: rect.minY + rect.height * 0.36),
+            control1: CGPoint(x: rect.minX + rect.width * 0.22, y: rect.maxY),
+            control2: CGPoint(x: rect.minX, y: rect.minY + rect.height * 0.76)
+        )
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX + rect.width * 0.10, y: upperLeft),
+            control: CGPoint(x: rect.minX, y: upperLeft)
+        )
+        path.closeSubpath()
+        return path
+    }
+}
+
+private struct CatEye: View {
+    let squinting: Bool
+    let wide: Bool
+
+    var body: some View {
+        ZStack {
+            if squinting {
+                Capsule()
+                    .fill(MascotPalette.eye)
+                    .frame(width: 8, height: 2.5)
+            } else {
+                Circle()
+                    .fill(MascotPalette.eye)
+                    .frame(width: wide ? 6 : 5, height: wide ? 6.5 : 5.5)
+                Circle()
+                    .fill(.white)
+                    .frame(width: 1.8, height: 1.8)
+                    .offset(x: 1.1, y: -1.2)
+            }
+        }
+        .frame(width: 8, height: 8)
+    }
+}
+
+private struct CatPaw: View {
+    let pose: MascotPose
+
+    var body: some View {
+        Circle()
+            .fill(MascotPalette.paw)
+            .frame(width: 14, height: 14)
+            .rotationEffect(.degrees(pose.pawAngle))
+            .offset(pose.pawShift)
     }
 }
 
 private struct Duster: View {
-    let isSlashing: Bool
+    let pose: MascotPose
 
     var body: some View {
-        VStack(spacing: -3) {
-            HStack(spacing: -3) {
-                Capsule().fill(.mint).frame(width: 5, height: 10).rotationEffect(.degrees(-20))
-                Capsule().fill(.mint).frame(width: 5, height: 12)
-                Capsule().fill(.mint).frame(width: 5, height: 10).rotationEffect(.degrees(20))
+        VStack(spacing: -4) {
+            HStack(spacing: -4) {
+                feather(MascotPalette.dustDeep, height: 13, angle: -28)
+                feather(MascotPalette.dust, height: 16, angle: -12)
+                feather(MascotPalette.dustLight, height: 18, angle: 0)
+                feather(MascotPalette.dust, height: 16, angle: 12)
+                feather(MascotPalette.dustDeep, height: 13, angle: 28)
             }
             Capsule()
-                .fill(.white.opacity(0.9))
-                .frame(width: 3, height: 10)
+                .fill(MascotPalette.handle)
+                .frame(width: 3.5, height: 16)
         }
-        .rotationEffect(.degrees(isSlashing ? -48 : -18))
-        .offset(x: isSlashing ? 8 : 5, y: isSlashing ? -3 : 4)
+        .rotationEffect(.degrees(pose.dusterAngle), anchor: .bottom)
+        .offset(pose.dusterShift)
+    }
+
+    private func feather(_ color: Color, height: CGFloat, angle: Double) -> some View {
+        Capsule()
+            .fill(color)
+            .frame(width: 6, height: height)
+            .rotationEffect(.degrees(angle))
+    }
+}
+
+private struct DustBurst: View {
+    let progress: CGFloat
+
+    var body: some View {
+        ZStack {
+            speck(MascotPalette.dustLight, distance: CGSize(width: 22, height: -18), size: 6)
+            speck(MascotPalette.dust, distance: CGSize(width: 30, height: -6), size: 5)
+            speck(MascotPalette.dustDeep, distance: CGSize(width: 14, height: -26), size: 5)
+            speck(MascotPalette.dust, distance: CGSize(width: 34, height: -20), size: 4)
+            Capsule()
+                .fill(MascotPalette.dustLight)
+                .frame(width: 8, height: 3)
+                .rotationEffect(.degrees(-30))
+                .scaleEffect(0.3 + progress * 1.3)
+                .offset(x: 18 * progress, y: -24 * progress)
+                .opacity(Double(1 - progress))
+        }
+        .offset(x: 8, y: 2)
+        .allowsHitTesting(false)
+    }
+
+    private func speck(_ color: Color, distance: CGSize, size: CGFloat) -> some View {
+        Circle()
+            .fill(color)
+            .frame(width: size, height: size)
+            .scaleEffect(0.35 + progress * 1.5)
+            .offset(x: distance.width * progress, y: distance.height * progress)
+            .opacity(Double(1 - progress))
     }
 }
 
