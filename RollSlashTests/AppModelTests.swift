@@ -238,6 +238,109 @@ struct AppModelTests {
         #expect(harness.model.assetIndex["jan-new"]?.isFavorite == true)
     }
 
+    @Test("coalesced library changes drain after a favorite update while staying in the foreground")
+    func coalescedChangesDrainInTheForeground() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let initialFetches = harness.client.fetchCallCount
+        harness.client.suspendFetches = true
+        try await harness.model.setFavorite(true, for: "jan-new")
+        harness.client.assets.append(makeAsset(id: "new-photo", date: .now))
+        harness.client.onLibraryChange?()
+
+        await harness.client.waitForPendingFetches(1)
+        #expect(harness.client.fetchCallCount == initialFetches + 1)
+        harness.client.suspendFetches = false
+        harness.client.finishFetch(at: 0, returning: harness.client.assets)
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while harness.model.isLoading && clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!harness.model.isLoading)
+        #expect(harness.model.assetIndex["new-photo"] != nil)
+    }
+
+    @Test("a library reload clears coalesced callbacks without another foreground fetch")
+    func reloadDrainsCoalescedChanges() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        try await harness.model.setFavorite(true, for: "jan-new")
+        await harness.model.reloadLibrary()
+        let fetches = harness.client.fetchCallCount
+        await harness.model.refreshForForeground()
+        #expect(harness.client.fetchCallCount == fetches)
+    }
+
+    @Test("favorite reads reuse loaded metadata and local favorite changes")
+    func favoriteMetadataCache() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        #expect(await harness.model.isFavorite("jan-new") == false)
+        try await harness.model.setFavorite(true, for: "jan-new")
+        #expect(await harness.model.isFavorite("jan-new") == true)
+        #expect(harness.client.favoriteLookupCount == 0)
+    }
+
+    @Test("location lookup pauses in the background and resumes without refetching Photos")
+    func locationLookupResumesInForeground() async throws {
+        let resolver = SuspendedLocationResolver()
+        let harness = try makeHarness(locationResolver: resolver)
+        harness.client.assets = [PhotoAssetDescriptor(
+            id: "located-photo", creationDate: .now,
+            coordinate: GeoCoordinate(latitude: 13.7563, longitude: 100.5018),
+            mediaKind: .photo, duration: 0, pixelWidth: 100, pixelHeight: 100
+        )]
+        await harness.model.start()
+        harness.model.setForeground(false)
+        harness.model.grouping = .location
+        await harness.model.reloadLibrary()
+        #expect(await resolver.requestCount == 0)
+        let fetches = harness.client.fetchCallCount
+
+        harness.model.setForeground(true)
+        try #require(await resolver.waitForRequest(count: 1))
+        harness.model.setForeground(false)
+        await resolver.finish(with: ResolvedLocation(city: "Discarded", country: "Thailand"))
+        harness.model.setForeground(true)
+        try #require(await resolver.waitForRequest(count: 2))
+        await resolver.finish(with: ResolvedLocation(city: "Bangkok", country: "Thailand"))
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !harness.model.locationGroups.contains(where: { $0.title == "Bangkok" }), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(harness.model.locationGroups.contains { $0.title == "Bangkok" })
+        #expect(!harness.model.locationGroups.contains { $0.title == "Discarded" })
+        #expect(harness.client.fetchCallCount == fetches)
+    }
+
+    @Test("removed groups do not leave a selected empty cleanup on the dashboard")
+    func removedGroupsClearSelection() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.client.assets.removeAll { january.assetIDs.contains($0.id) }
+        await harness.model.reloadLibrary()
+        #expect(harness.model.selectedGroupIDs.isEmpty)
+        #expect(harness.model.selectedCandidateCount == 0)
+    }
+
+    @Test("a failed initial library load can be retried without a stale error")
+    func failedLibraryLoadRetries() async throws {
+        let harness = try makeHarness()
+        harness.client.shouldFailFetch = true
+        await harness.model.start()
+        #expect(harness.model.libraryLoadError != nil)
+        #expect(!harness.model.isLoading)
+        #expect(harness.model.visibleGroups.isEmpty)
+        harness.client.shouldFailFetch = false
+        await harness.model.reloadLibrary()
+        #expect(harness.model.libraryLoadError == nil)
+        #expect(harness.model.errorMessage == nil)
+        #expect(harness.model.assets.count == 3)
+    }
+
     @Test("permission changes refresh and clear inaccessible dashboard state")
     func permissionRefresh() async throws {
         let harness = try makeHarness()
@@ -572,7 +675,8 @@ struct AppModelTests {
     private func makeHarness(
         failDeletion: Bool = false,
         permission: PhotoPermission = .full,
-        onboardingDefaults: UserDefaults = .standard
+        onboardingDefaults: UserDefaults = .standard,
+        locationResolver: any LocationResolver = TestLocationResolver()
     ) throws -> Harness {
         let calendar = Calendar(identifier: .gregorian)
         let assets = [
@@ -589,7 +693,7 @@ struct AppModelTests {
         let model = AppModel(
             photoLibrary: client,
             previewProvider: TestPreviewProvider(),
-            locationResolver: TestLocationResolver(),
+            locationResolver: locationResolver,
             modelContainer: container,
             onboardingDefaults: onboardingDefaults
         )
@@ -627,6 +731,8 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
     var deletionResultOverride: Set<String>?
     var permission: PhotoPermission = .full
     var suspendFetches = false
+    var shouldFailFetch = false
+    var favoriteLookupCount = 0
     var suspendEstimates = false
     var suspendDeletions = false
     var deletionCallCount = 0
@@ -646,6 +752,7 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
 
     func fetchAssets() async throws -> [PhotoAssetDescriptor] {
         fetchCallCount += 1
+        if shouldFailFetch { throw URLError(.cannotLoadFromNetwork) }
         if suspendFetches {
             return await withCheckedContinuation { continuation in
                 pendingFetches.append(continuation)
@@ -695,7 +802,10 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
         pendingOperation?.resume()
         pendingOperation = nil
     }
-    func isFavorite(with identifier: String) async -> Bool { false }
+    func isFavorite(with identifier: String) async -> Bool {
+        favoriteLookupCount += 1
+        return assets.first { $0.id == identifier }?.isFavorite ?? false
+    }
     func setFavorite(_ favorite: Bool, for identifier: String) async throws {
         if let index = assets.firstIndex(where: { $0.id == identifier }) {
             assets[index].isFavorite = favorite
@@ -718,4 +828,27 @@ private final class TestPreviewProvider: MediaPreviewProvider {
 
 private struct TestLocationResolver: LocationResolver {
     func resolve(_ coordinate: GeoCoordinate) async throws -> ResolvedLocation? { nil }
+}
+
+private actor SuspendedLocationResolver: LocationResolver {
+    private(set) var requestCount = 0
+    private var continuation: CheckedContinuation<ResolvedLocation?, Error>?
+
+    func resolve(_ coordinate: GeoCoordinate) async throws -> ResolvedLocation? {
+        requestCount += 1
+        return try await withCheckedThrowingContinuation { continuation = $0 }
+    }
+
+    func waitForRequest(count: Int) async throws -> Bool {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while requestCount < count, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return requestCount >= count
+    }
+
+    func finish(with location: ResolvedLocation) {
+        continuation?.resume(returning: location)
+        continuation = nil
+    }
 }

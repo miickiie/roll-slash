@@ -45,6 +45,7 @@ struct SettingsView: View {
                                             confirmingReset = false
                                         }
                                         .buttonStyle(.borderedProminent)
+                                        .foregroundStyle(.white)
                                     }
                                 }
                             } else {

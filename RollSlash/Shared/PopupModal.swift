@@ -13,11 +13,17 @@ struct PopupModal<Content: View>: View {
             Color.black.opacity(0.58)
                 .ignoresSafeArea()
 
-            content
+            ViewThatFits(in: .vertical) {
+                content.fixedSize(horizontal: false, vertical: true)
+                ScrollView { content }
+                    .scrollBounceBehavior(.basedOnSize)
+                    .accessibilityIdentifier("popup-content-scroll")
+            }
                 .padding(24)
                 .frame(maxWidth: 380)
                 .background(Color(uiColor: .secondarySystemBackground), in: .rect(cornerRadius: 28))
                 .foregroundStyle(Color.primary)
+                .clipShape(.rect(cornerRadius: 28))
                 .overlay {
                     RoundedRectangle(cornerRadius: 28)
                         .stroke(Color.primary.opacity(0.12), lineWidth: 1)
@@ -47,13 +53,13 @@ struct PopupActionRow<Cancel: View, Confirm: View>: View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
                 cancel.fixedSize(horizontal: true, vertical: false)
-                confirm.fixedSize(horizontal: true, vertical: false)
+                confirm.fixedSize(horizontal: true, vertical: false).foregroundStyle(.white)
             }
             .frame(maxWidth: .infinity, alignment: .center)
 
             VStack(spacing: 10) {
-                cancel.fixedSize(horizontal: true, vertical: false)
-                confirm.fixedSize(horizontal: true, vertical: false)
+                cancel.fixedSize(horizontal: false, vertical: true)
+                confirm.fixedSize(horizontal: false, vertical: true).foregroundStyle(.white)
             }
             .frame(maxWidth: .infinity, alignment: .center)
         }

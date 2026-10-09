@@ -147,6 +147,82 @@ private final class PendingPreviewRequest {
 }
 
 @MainActor
+@Suite("Preview image cache")
+struct PreviewImageCacheTests {
+    @Test("recently viewed images survive count-based eviction")
+    func leastRecentlyUsedEviction() {
+        let cache = PreviewImageCache(countLimit: 2)
+        let image = makeImage(size: 10)
+        for id in ["a", "b"] { cache.store(image, for: key(id), generation: cache.generation) }
+        #expect(cache.image(for: key("a")) === image)
+        cache.store(image, for: key("c"), generation: cache.generation)
+        #expect(cache.image(for: key("b")) == nil)
+        #expect(cache.image(for: key("a")) === image)
+        #expect(cache.image(for: key("c")) === image)
+    }
+
+    @Test("decoded byte limits evict old images and reject oversized images")
+    func decodedByteLimit() throws {
+        let image = makeImage(size: 10)
+        let pixels = try #require(image.cgImage)
+        let cost = pixels.bytesPerRow * pixels.height
+        let cache = PreviewImageCache(byteLimit: cost * 2)
+        for id in ["a", "b", "c"] { cache.store(image, for: key(id), generation: cache.generation) }
+        #expect(cache.byteCount == cost * 2)
+        #expect(cache.image(for: key("a")) == nil)
+        cache.store(makeImage(size: 100), for: key("oversized"), generation: cache.generation)
+        #expect(cache.image(for: key("oversized")) == nil)
+        #expect(cache.image(for: key("b")) === image)
+        #expect(cache.image(for: key("c")) === image)
+        cache.store(image, for: key("b"), generation: cache.generation)
+        #expect(cache.byteCount == cost * 2)
+    }
+
+    @Test("invalidation rejects results from requests started before a library change")
+    func staleRequestCannotRepopulateCache() {
+        let cache = PreviewImageCache()
+        let image = makeImage(size: 10)
+        let oldGeneration = cache.generation
+        cache.store(image, for: key("a"), generation: oldGeneration)
+        cache.removeAll()
+        cache.store(image, for: key("a"), generation: oldGeneration)
+        #expect(cache.byteCount == 0)
+        #expect(cache.image(for: key("a")) == nil)
+        cache.store(image, for: key("a"), generation: cache.generation)
+        #expect(cache.image(for: key("a")) === image)
+    }
+
+    @Test("stopping navigation preheating preserves images until explicit invalidation")
+    func navigationCacheLifecycle() async {
+        let cache = PreviewImageCache()
+        let image = makeImage(size: 10)
+        let size = CGSize(width: 900, height: 1200)
+        let request = PreviewImageCache.Key(identifier: "fixture", kind: .active, targetSize: size)
+        cache.store(image, for: request, generation: cache.generation)
+        let provider = PhotoKitMediaPreviewProvider(imageCache: cache)
+        #expect(await provider.image(for: "fixture", targetSize: size, kind: .active) === image)
+        provider.stopCachingAll()
+        #expect(await provider.image(for: "fixture", targetSize: size, kind: .active) === image)
+        provider.invalidateCachedImages()
+        #expect(cache.image(for: request) == nil)
+        #expect(cache.byteCount == 0)
+    }
+
+    private func key(_ id: String) -> PreviewImageCache.Key {
+        PreviewImageCache.Key(identifier: id, kind: .active, targetSize: CGSize(width: 10, height: 10))
+    }
+
+    private func makeImage(size: CGFloat) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: size, height: size), format: format).image { context in
+            UIColor.orange.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: size, height: size))
+        }
+    }
+}
+
+@MainActor
 @Suite("Hosted preview lifecycle", .serialized)
 struct PreviewLifecycleTests {
     @Test("same-identifier edits reload cleanup cards and thumbnails", arguments: [false, true])
@@ -221,8 +297,129 @@ struct PreviewLifecycleTests {
         #expect(provider.didStopCaching)
     }
 
-    private func asset(_ id: String, modified: TimeInterval) -> PhotoAssetDescriptor {
-        PhotoAssetDescriptor(id: id, creationDate: nil, coordinate: nil, mediaKind: .photo,
+    @Test("a delayed next photo is loaded before promotion and retained for undo")
+    func swipePreviewsRemainLoaded() async throws {
+        let provider = DelayedSwipePreviewProvider()
+        let model = try await makeSwipeModel(
+            assets: ["a", "b", "c", "d", "e"].map { asset($0, modified: 1) }, provider: provider
+        )
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: CleanupView().environment(model))
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            provider.finishAll()
+            previousKeyWindow?.makeKeyAndVisible()
+        }
+        try #require(await waitUntil { Set(provider.images) == ["a", "b", "c"] })
+        provider.finish("a", color: .red)
+        provider.finish("b", color: .blue)
+        provider.finish("c", color: .green)
+        try #require(await waitUntil { centerColor(of: window, matches: (255, 0, 0)) })
+
+        await model.decide(.keep)
+        try #require(await waitUntil { provider.images.contains("d") })
+        #expect(model.currentAsset?.id == "b")
+        #expect(centerColor(of: window, matches: (0, 0, 255)))
+        #expect(provider.images.filter { $0 == "b" }.count == 1)
+        #expect(!provider.images.contains("e"))
+        #expect(model.swipePreviewAssets.count == 4)
+
+        model.undo()
+        try #require(await waitUntil { model.currentAsset?.id == "a" && centerColor(of: window, matches: (255, 0, 0)) })
+        #expect(provider.images.filter { $0 == "a" }.count == 1)
+        #expect(provider.images.filter { $0 == "b" }.count == 1)
+    }
+
+    @Test("look-ahead loads posters and requests motion only for the active card")
+    func upcomingMotionStaysDeferred() async throws {
+        let provider = DelayedSwipePreviewProvider()
+        let model = try await makeSwipeModel(assets: [
+            asset("a", modified: 1), asset("b", modified: 1, kind: .video),
+            asset("c", modified: 1, kind: .livePhoto), asset("d", modified: 1)
+        ], provider: provider)
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: CleanupView().environment(model))
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            provider.finishAll()
+            previousKeyWindow?.makeKeyAndVisible()
+        }
+        try #require(await waitUntil { Set(provider.images) == ["a", "b", "c"] })
+        provider.finish("a", color: .red)
+        provider.finish("b", color: .blue)
+        provider.finish("c", color: .green)
+        try #require(await waitUntil { centerColor(of: window, matches: (255, 0, 0)) })
+        #expect(provider.videoRequests.isEmpty)
+        #expect(provider.liveRequests.isEmpty)
+        await model.decide(.keep)
+        try #require(await waitUntil { provider.videoRequests == ["b"] })
+        #expect(provider.liveRequests.isEmpty)
+        #expect(centerColor(of: window, matches: (0, 0, 255)))
+        await model.decide(.deletePending)
+        try #require(await waitUntil { provider.liveRequests == ["c"] })
+        #expect(provider.videoRequests == ["b"])
+        #expect(provider.images.filter { $0 == "c" }.count == 1)
+    }
+
+    @Test("the swipe buffer stops at comparison sets and respects its size limit")
+    func swipeBufferBoundaries() async throws {
+        let provider = RecordingPreviewProvider()
+        let model = try await makeSwipeModel(assets: ["a", "b", "c", "d", "e"].map { asset($0, modified: 1) },
+            provider: provider, units: [
+                .swipe("a"), CleanupWorkUnit(kind: .comparison, assetIDs: ["b", "c"], contextAssetIDs: [], clusterID: "set"),
+                .swipe("d"), .swipe("e")
+            ])
+        #expect(model.swipePreviewAssets.map(\.id) == ["a"])
+        await model.decide(.keep)
+        #expect(model.route == .similarComparison)
+        #expect(model.swipePreviewAssets.isEmpty)
+        await model.confirmComparison(keepAll: true)
+        #expect(model.currentAsset?.id == "d")
+        #expect(model.swipePreviewAssets.map(\.id) == ["d", "e"])
+    }
+
+    private func makeSwipeModel(assets: [PhotoAssetDescriptor], provider: any MediaPreviewProvider,
+                                units: [CleanupWorkUnit]? = nil) async throws -> AppModel {
+        let container = try ModelContainer(for: RollSlashSchema.schema,
+                                           configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
+        let repository = SwiftDataCleanupRepository(container: container)
+        _ = try repository.createSession(groupKind: .month, selectedGroupKeys: ["month:no-date"],
+            orderedAssetIDs: assets.map(\.id),
+            workPlan: CleanupWorkPlan(units: units ?? assets.map { .swipe($0.id) }))
+        let model = AppModel(photoLibrary: PreviewTestLibrary(assets: assets), previewProvider: provider,
+                             locationResolver: DemoLocationResolver(), modelContainer: container,
+                             analysisClient: PreviewTestAnalysis())
+        await model.start()
+        model.resumeSession()
+        return model
+    }
+
+    private func centerColor(of window: UIWindow, matches expected: (UInt8, UInt8, UInt8)) -> Bool {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let snapshot = UIGraphicsImageRenderer(bounds: window.bounds, format: format).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        guard let image = snapshot.cgImage else { return false }
+        var pixel = [UInt8](repeating: 0, count: 4)
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        guard let context = CGContext(data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info) else { return false }
+        context.translateBy(x: -window.bounds.midX, y: -window.bounds.midY)
+        context.draw(image, in: window.bounds)
+        return zip(pixel.prefix(3), [expected.0, expected.1, expected.2]).allSatisfy { abs(Int($0) - Int($1)) < 5 }
+    }
+
+    private func asset(_ id: String, modified: TimeInterval, kind: MediaKind = .photo) -> PhotoAssetDescriptor {
+        PhotoAssetDescriptor(id: id, creationDate: nil, coordinate: nil, mediaKind: kind,
                              duration: 0, pixelWidth: 100, pixelHeight: 100,
                              modificationDate: Date(timeIntervalSince1970: modified))
     }
@@ -310,4 +507,44 @@ private struct PreviewLifecycleHost: View {
 private struct PreviewTestAnalysis: MediaAnalysisClient {
     func analyze(_ asset: PhotoAssetDescriptor) async -> MediaAnalysisResult { MediaAnalysisResult() }
     func clusters(assets: [PhotoAssetDescriptor], results: [String: MediaAnalysisResult]) async -> [SimilarPhotoCluster] { [] }
+}
+
+@MainActor private final class DelayedSwipePreviewProvider: MediaPreviewProvider {
+    private(set) var images: [String] = []
+    private(set) var videoRequests: [String] = []
+    private(set) var liveRequests: [String] = []
+    private var pending: [String: [CheckedContinuation<UIImage?, Never>]] = [:]
+
+    func image(for identifier: String, targetSize: CGSize, kind: PreviewRequestKind) async -> UIImage? {
+        images.append(identifier)
+        return await withCheckedContinuation { pending[identifier, default: []].append($0) }
+    }
+
+    func finish(_ identifier: String, color: UIColor) {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 100, height: 100)).image { context in
+            color.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 100, height: 100))
+        }
+        pending.removeValue(forKey: identifier)?.forEach { $0.resume(returning: image) }
+    }
+
+    func finishAll() {
+        let requests = pending.values.flatMap { $0 }
+        pending.removeAll()
+        requests.forEach { $0.resume(returning: nil) }
+    }
+
+    func livePhoto(for identifier: String, targetSize: CGSize) async -> PHLivePhoto? {
+        liveRequests.append(identifier)
+        return nil
+    }
+
+    func playerItem(for identifier: String) async -> AVPlayerItem? {
+        videoRequests.append(identifier)
+        return nil
+    }
+
+    func shareableVideoURL(for identifier: String) async throws -> URL? { nil }
+    func startCaching(identifiers: [String], targetSize: CGSize, kind: PreviewRequestKind) {}
+    func stopCachingAll() {}
 }

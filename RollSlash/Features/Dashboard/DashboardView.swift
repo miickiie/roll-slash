@@ -99,6 +99,12 @@ struct DashboardView: View {
                 get: { appModel.errorMessage != nil },
                 set: { if !$0 { appModel.errorMessage = nil } }
             )) {
+                if appModel.libraryLoadError != nil {
+                    Button("Retry") {
+                        appModel.errorMessage = nil
+                        Task { await appModel.reloadLibrary() }
+                    }
+                }
                 Button("OK", role: .cancel) { appModel.errorMessage = nil }
             } message: {
                 Text(appModel.errorMessage ?? "")
@@ -162,6 +168,15 @@ struct DashboardView: View {
                     Spacer()
                     ProgressView("Reading your library…")
                     Spacer()
+                } else if appModel.libraryLoadError != nil && appModel.visibleGroups.isEmpty {
+                    ContentUnavailableView {
+                        Label("Could not load your library", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text("Try reading your Photos library again.")
+                    } actions: {
+                        Button("Retry") { Task { await appModel.reloadLibrary() } }
+                            .accessibilityIdentifier("retry-library")
+                    }
                 } else if appModel.visibleGroups.isEmpty {
                     ContentUnavailableView(
                         "Nothing to clean",
@@ -816,6 +831,7 @@ private struct GroupList: View {
 
 private struct MonthGroupList: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Binding var scrollMemory: DashboardScrollMemory
     let onInteraction: () -> Void
     @State private var dragStarted = false
@@ -841,81 +857,107 @@ private struct MonthGroupList: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            ZStack(alignment: .trailing) {
-                ScrollView {
-                    LazyVStack(alignment: .leading, pinnedViews: [.sectionHeaders]) {
-                        ForEach(sections, id: \.0) { year, groups in
-                            Section {
-                                LazyVGrid(columns: groups.count == 1 ? singleColumn : columns, spacing: 12) {
-                                    ForEach(groups) { group in
-                                        MonthGroupCard(group: group, onSelect: { scrollMemory.monthAnchorID = group.id })
-                                            .id(group.id)
-                                    }
-                                }
-                                .scrollTargetLayout()
-                            } header: {
-                                Text(year)
-                                    .font(.title2.bold())
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.vertical, 6)
-                                    .background(Color(.systemGroupedBackground))
-                                    .id(year)
+            VStack(spacing: 0) {
+                if dynamicTypeSize.isAccessibilitySize {
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 8) {
+                            ForEach(sections, id: \.0) { year, groups in
+                                yearButton(year, firstGroupID: groups.first?.id, proxy: proxy)
                             }
                         }
+                        .padding(.horizontal)
                     }
-                    .padding(.horizontal)
-                    .padding(.trailing, 40)
-                    .padding(.bottom, 120)
+                    .scrollIndicators(.hidden)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                .scrollPosition(id: $scrollMemory.monthID)
-                .accessibilityIdentifier("month-group-list")
-                .task(id: orderedGroupIDs) {
-                    guard !orderedGroupIDs.isEmpty else { return }
-                    if didRestoreMonth {
-                        if let anchor = scrollMemory.monthAnchorID, !orderedGroupIDs.contains(anchor) {
-                            scrollMemory.reconcileMonth(orderedGroupIDs)
-                        } else {
-                            scrollMemory.monthOrder = orderedGroupIDs
+                ZStack(alignment: .trailing) {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, pinnedViews: [.sectionHeaders]) {
+                            ForEach(sections, id: \.0) { year, groups in
+                                Section {
+                                    LazyVGrid(columns: groups.count == 1 || dynamicTypeSize.isAccessibilitySize ? singleColumn : columns, spacing: 12) {
+                                        ForEach(groups) { group in
+                                            MonthGroupCard(group: group, onSelect: { scrollMemory.monthAnchorID = group.id })
+                                                .id(group.id)
+                                        }
+                                    }
+                                    .scrollTargetLayout()
+                                } header: {
+                                    Text(year)
+                                        .font(.title2.bold())
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.vertical, 6)
+                                        .background(Color(.systemGroupedBackground))
+                                        .id(year)
+                                }
+                            }
                         }
-                        return
+                        .padding(.horizontal)
+                        .padding(.trailing, dynamicTypeSize.isAccessibilitySize ? 0 : 40)
+                        .padding(.bottom, 120)
                     }
-                    scrollMemory.reconcileMonth(orderedGroupIDs)
-                    didRestoreMonth = true
-                    if let anchor = scrollMemory.monthAnchorID {
-                        await Task.yield()
-                        proxy.scrollTo(anchor, anchor: .center)
+                    .scrollPosition(id: $scrollMemory.monthID)
+                    .accessibilityIdentifier("month-group-list")
+                    .task(id: orderedGroupIDs) {
+                        guard !orderedGroupIDs.isEmpty else { return }
+                        if didRestoreMonth {
+                            if let anchor = scrollMemory.monthAnchorID, !orderedGroupIDs.contains(anchor) {
+                                scrollMemory.reconcileMonth(orderedGroupIDs)
+                            } else {
+                                scrollMemory.monthOrder = orderedGroupIDs
+                            }
+                            return
+                        }
+                        scrollMemory.reconcileMonth(orderedGroupIDs)
+                        didRestoreMonth = true
+                        if let anchor = scrollMemory.monthAnchorID {
+                            await Task.yield()
+                            proxy.scrollTo(anchor, anchor: .center)
+                        }
+                    }
+                    .onDisappear { didRestoreMonth = false }
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 8)
+                            .onChanged { _ in
+                                guard !dragStarted else { return }
+                                dragStarted = true
+                                onInteraction()
+                            }
+                            .onEnded { _ in
+                                dragStarted = false
+                                if let id = scrollMemory.monthID { scrollMemory.monthAnchorID = id }
+                            }
+                    )
+                    if !dynamicTypeSize.isAccessibilitySize {
+                        ScrollView {
+                            VStack(spacing: 8) {
+                                ForEach(sections, id: \.0) { year, groups in
+                                    yearButton(year, firstGroupID: groups.first?.id, proxy: proxy)
+                                }
+                            }
+                        }
+                        .scrollIndicators(.hidden)
+                        .frame(width: 48)
+                        .padding(.trailing, 4)
                     }
                 }
-                .onDisappear { didRestoreMonth = false }
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 8)
-                        .onChanged { _ in
-                            guard !dragStarted else { return }
-                            dragStarted = true
-                            onInteraction()
-                        }
-                        .onEnded { _ in
-                            dragStarted = false
-                            if let id = scrollMemory.monthID { scrollMemory.monthAnchorID = id }
-                        }
-                )
-                VStack(spacing: 8) {
-                    ForEach(sections, id: \.0) { year, groups in
-                        Button(year) {
-                            onInteraction()
-                            scrollMemory.monthAnchorID = groups.first?.id
-                            withAnimation { proxy.scrollTo(year, anchor: .top) }
-                        }
-                        .font(.caption2.bold())
-                        .foregroundStyle(RollSlashTheme.violet)
-                        .frame(minWidth: 44, minHeight: 44)
-                        .contentShape(.rect)
-                        .accessibilityLabel("Jump to \(year)")
-                    }
-                }
-                .padding(.trailing, 4)
             }
         }
+    }
+
+    private func yearButton(_ year: String, firstGroupID: String?, proxy: ScrollViewProxy) -> some View {
+        Button(year) {
+            onInteraction()
+            scrollMemory.monthAnchorID = firstGroupID
+            withAnimation { proxy.scrollTo(year, anchor: .top) }
+        }
+        .font(.caption2.bold())
+        .lineLimit(1)
+        .minimumScaleFactor(0.5)
+        .foregroundStyle(RollSlashTheme.violet)
+        .frame(minWidth: 44, minHeight: 44)
+        .contentShape(.rect)
+        .accessibilityLabel("Jump to \(year)")
     }
 }
 

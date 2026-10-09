@@ -3,7 +3,7 @@ import Photos
 import PhotosUI
 import UIKit
 
-enum PreviewRequestKind: Sendable, Equatable {
+enum PreviewRequestKind: Sendable, Hashable {
     case thumbnail
     case active
     case comparison
@@ -114,21 +114,116 @@ extension MediaPreviewProvider {
 }
 
 @MainActor
+final class PreviewImageCache {
+    struct Key: Hashable {
+        let identifier: String
+        let kind: PreviewRequestKind
+        let width: Int
+        let height: Int
+
+        init(identifier: String, kind: PreviewRequestKind, targetSize: CGSize) {
+            self.identifier = identifier
+            self.kind = kind
+            width = Int(targetSize.width.rounded())
+            height = Int(targetSize.height.rounded())
+        }
+    }
+
+    private struct Entry {
+        let image: UIImage
+        let cost: Int
+    }
+
+    private let byteLimit: Int
+    private let countLimit: Int
+    private var entries: [Key: Entry] = [:]
+    private var order: [Key] = []
+    private(set) var generation = 0
+    private(set) var byteCount = 0
+
+    init(byteLimit: Int = 48 * 1024 * 1024, countLimit: Int = 96) {
+        self.byteLimit = max(0, byteLimit)
+        self.countLimit = max(0, countLimit)
+    }
+
+    func image(for key: Key) -> UIImage? {
+        guard let entry = entries[key] else { return nil }
+        touch(key)
+        return entry.image
+    }
+
+    func store(_ image: UIImage, for key: Key, generation: Int) {
+        guard generation == self.generation, countLimit > 0 else { return }
+        let cost: Int
+        if let pixels = image.cgImage {
+            let size = pixels.bytesPerRow.multipliedReportingOverflow(by: pixels.height)
+            guard !size.overflow else { return }
+            cost = size.partialValue
+        } else {
+            let size = image.size.width * image.size.height * image.scale * image.scale * 4
+            guard size.isFinite, size > 0, size < CGFloat(Int.max) else { return }
+            cost = Int(size)
+        }
+        guard cost > 0, cost <= byteLimit else { return }
+        if let previous = entries[key] { byteCount -= previous.cost }
+        entries[key] = Entry(image: image, cost: cost)
+        byteCount += cost
+        touch(key)
+        while byteCount > byteLimit || entries.count > countLimit {
+            let oldest = order.removeFirst()
+            if let removed = entries.removeValue(forKey: oldest) { byteCount -= removed.cost }
+        }
+    }
+
+    func removeAll() {
+        generation += 1
+        entries.removeAll()
+        order.removeAll()
+        byteCount = 0
+    }
+
+    private func touch(_ key: Key) {
+        order.removeAll { $0 == key }
+        order.append(key)
+    }
+}
+
+private final class PreviewMemoryWarningObservation {
+    private let token: NSObjectProtocol
+
+    init(handler: @escaping @Sendable () -> Void) {
+        token = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
+        ) { _ in handler() }
+    }
+
+    deinit { NotificationCenter.default.removeObserver(token) }
+}
+
+@MainActor
 final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
     private let manager = PHCachingImageManager()
     private var cachedAssets: [String: PHAsset] = [:]
     private var resolvedAssets: [String: PHAsset] = [:]
-    private var renderedImages: [String: UIImage] = [:]
-    private var renderedOrder: [String] = []
-    private var renderedBytes = 0
+    private let renderedImages: PreviewImageCache
     private var cachedConfiguration: PreviewImageConfiguration?
     private var cachedKind: PreviewRequestKind?
-    private let renderedByteLimit = 48 * 1024 * 1024
+    private var memoryWarningObservation: PreviewMemoryWarningObservation?
+
+    init(imageCache: PreviewImageCache = PreviewImageCache()) {
+        renderedImages = imageCache
+        memoryWarningObservation = PreviewMemoryWarningObservation { [weak self] in
+            Task { @MainActor in self?.invalidateCachedImages() }
+        }
+    }
 
     func image(for identifier: String, targetSize: CGSize, kind: PreviewRequestKind) async -> UIImage? {
+        guard !Task.isCancelled else { return nil }
         let configuration = PreviewImageConfiguration(kind: kind, targetSize: targetSize)
-        let key = cacheKey(identifier: identifier, kind: kind, targetSize: configuration.targetSize)
-        if kind != .fullResolution, let cached = renderedImages[key] { return cached }
+        let key = kind == .fullResolution ? nil
+            : PreviewImageCache.Key(identifier: identifier, kind: kind, targetSize: configuration.targetSize)
+        if let key, let cached = renderedImages.image(for: key) { return cached }
+        let generation = renderedImages.generation
         guard let asset = asset(for: identifier) else { return nil }
         let image = await PreviewImageDelivery.image(kind: kind) { handler in
             manager.requestImage(for: asset, targetSize: configuration.targetSize,
@@ -137,7 +232,9 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
         } cancel: { [manager] requestID in
             manager.cancelImageRequest(requestID)
         }
-        if let image, kind != .fullResolution { storeRendered(image, for: key) }
+        if let image, let key {
+            renderedImages.store(image, for: key, generation: generation)
+        }
         return image
     }
 
@@ -241,13 +338,11 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
         cachedAssets.removeAll()
         cachedConfiguration = nil
         cachedKind = nil
-        invalidateCachedImages()
     }
 
     func invalidateCachedImages() {
+        stopCachingAll()
         renderedImages.removeAll()
-        renderedOrder.removeAll()
-        renderedBytes = 0
         resolvedAssets.removeAll()
     }
 
@@ -266,33 +361,6 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
         resolvedAssets[identifier] = asset
     }
 
-    private func cacheKey(identifier: String, kind: PreviewRequestKind, targetSize: CGSize) -> String {
-        "\(identifier)|\(kind)|\(Int(targetSize.width.rounded()))x\(Int(targetSize.height.rounded()))"
-    }
-
-    private func storeRendered(_ image: UIImage, for key: String) {
-        let cost = renderedCost(image)
-        guard cost > 0, cost <= renderedByteLimit / 4 else { return }
-        if let existing = renderedImages[key] {
-            renderedBytes -= renderedCost(existing)
-        } else {
-            renderedOrder.append(key)
-        }
-        renderedImages[key] = image
-        renderedBytes += cost
-        while renderedBytes > renderedByteLimit, let oldest = renderedOrder.first {
-            renderedOrder.removeFirst()
-            if let removed = renderedImages.removeValue(forKey: oldest) {
-                renderedBytes -= renderedCost(removed)
-            }
-        }
-        if renderedBytes < 0 { renderedBytes = 0 }
-    }
-
-    private func renderedCost(_ image: UIImage) -> Int {
-        let pixels = image.size.width * image.size.height * image.scale * image.scale
-        return Int(pixels * 4)
-    }
 }
 
 private extension CGSize {

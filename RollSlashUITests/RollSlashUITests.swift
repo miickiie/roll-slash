@@ -152,6 +152,35 @@ final class RollSlashUITests: XCTestCase {
         close.tap()
     }
 
+    func testPreloadedCardsRemainVisibleAfterKeepDeleteSwipesAndUndo() {
+        let app = XCUIApplication()
+        app.launchArguments.append("--ui-testing")
+        app.launch()
+        for month in ["2026-08", "2026-07", "2026-06"] {
+            let group = app.buttons["group-row-month:\(month)"]
+            XCTAssertTrue(group.waitForExistence(timeout: 5))
+            group.tap()
+        }
+        app.buttons["clean-selected"].tap()
+        let photo = app.descendants(matching: .any)["cleanup-photo-surface"].firstMatch
+        XCTAssertTrue(photo.waitForExistence(timeout: 3))
+        photo.swipeRight()
+        XCTAssertTrue(app.staticTexts["2 left"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.staticTexts["Loading preview…"].exists)
+        XCTAssertTrue(waitUntilEnabled(app.buttons["decision-delete"]))
+        photo.swipeLeft()
+        XCTAssertTrue(app.staticTexts["1 left"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.staticTexts["Loading preview…"].exists)
+        let undo = app.buttons["undo-button"]
+        XCTAssertTrue(waitUntilEnabled(undo))
+        undo.tap()
+        XCTAssertTrue(waitUntilEnabled(app.buttons["redo-button"]))
+        XCTAssertTrue(app.staticTexts["2 left"].exists)
+        XCTAssertFalse(app.staticTexts["Loading preview…"].exists)
+        XCTAssertEqual(app.buttons.matching(identifier: "open-media-viewer").count, 1)
+        saveScreenshot(app, name: "Ready photo after keep, delete, and undo")
+    }
+
     func testPhotoTapUndoesButControlsAndMarginsDoNot() {
         let app = XCUIApplication()
         app.launchArguments.append("--ui-testing")
@@ -169,12 +198,14 @@ final class RollSlashUITests: XCTestCase {
         let undo = app.buttons["undo-button"]
         XCTAssertTrue(waitUntilEnabled(undo))
 
+        XCTAssertEqual(app.buttons.matching(identifier: "open-media-viewer").count, 1)
         app.buttons["open-media-viewer"].tap()
         app.buttons["close-media-viewer"].tap()
         XCTAssertTrue(undo.isEnabled)
 
         let photo = app.descendants(matching: .any)["cleanup-photo-surface"].firstMatch
         XCTAssertTrue(photo.waitForExistence(timeout: 3))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "cleanup-photo-surface").count, 1)
         photo.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: -0.5)).tap()
         XCTAssertTrue(undo.isEnabled, "Tapping the black margin must not undo")
         photo.tap()
@@ -458,6 +489,48 @@ final class RollSlashUITests: XCTestCase {
         let secondToggle = app.buttons["comparison-delete-demo-2"]
         XCTAssertLessThan(firstToggle.frame.maxX, secondToggle.frame.minX)
         saveScreenshot(app, name: "Two-column comparison at accessibility text size")
+    }
+
+    func testMonthGroupsAndConfirmationAdaptToAccessibilityTextSize() {
+        let app = XCUIApplication()
+        app.launchArguments += ["--ui-testing", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+        let first = app.buttons["group-row-month:2026-09"]
+        let second = app.buttons["group-row-month:2026-08"]
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        XCTAssertTrue(second.waitForExistence(timeout: 3))
+        saveScreenshot(app, name: "Month cards at accessibility text size")
+        XCTAssertGreaterThan(first.frame.width, app.frame.width / 2)
+        XCTAssertEqual(first.frame.minX, second.frame.minX, accuracy: 1)
+        // XCTest includes scaled, clipped thumbnail bounds in a button's frame.
+        XCTAssertLessThan(first.frame.midY, second.frame.midY)
+        let firstYear = app.buttons["Jump to 2026"]
+        let secondYear = app.buttons["Jump to 2025"]
+        XCTAssertTrue(firstYear.exists)
+        XCTAssertTrue(secondYear.exists)
+        XCTAssertEqual(firstYear.frame.minY, secondYear.frame.minY, accuracy: 1)
+        XCTAssertGreaterThan(firstYear.frame.width, firstYear.frame.height)
+
+        app.buttons["Settings"].tap()
+        let reset = app.buttons["Reset Cleanup History"]
+        for _ in 0..<8 where !reset.isHittable { app.swipeUp() }
+        XCTAssertTrue(reset.isHittable)
+        reset.tap()
+        XCTAssertTrue(app.staticTexts["Reset cleanup history?"].waitForExistence(timeout: 3))
+        let confirm = app.buttons["Reset History"]
+        let popupScroll = app.scrollViews["popup-content-scroll"]
+        XCTAssertTrue(popupScroll.exists)
+        for _ in 0..<5 where confirm.frame.maxY > popupScroll.frame.maxY { popupScroll.swipeUp() }
+        XCTAssertTrue(confirm.isHittable)
+        XCTAssertGreaterThanOrEqual(confirm.frame.minX, 0)
+        XCTAssertLessThanOrEqual(confirm.frame.maxX, app.frame.width)
+        XCTAssertLessThanOrEqual(confirm.frame.maxY, popupScroll.frame.maxY)
+        saveScreenshot(app, name: "Scrollable confirmation at accessibility text size")
+        let cancel = app.buttons["Keep History"]
+        for _ in 0..<5 where !cancel.isHittable { app.swipeDown() }
+        XCTAssertTrue(cancel.isHittable)
+        cancel.tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 3))
     }
 
     func testSimilarPreviewPreservesReadOnlyReviewedSiblings() {

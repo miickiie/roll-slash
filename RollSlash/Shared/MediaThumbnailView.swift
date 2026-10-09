@@ -35,6 +35,7 @@ struct MediaThumbnailView: View {
             }
         }
         .clipped()
+        .accessibilityHidden(true)
         .task(id: request) {
             image = nil
             loadFailed = false

@@ -327,7 +327,7 @@ struct TypeGroupingTests {
         #expect(harness.model.similarClusters.isEmpty)
     }
 
-    @Test("backgrounding cancels analysis and library callbacks cannot restart it")
+    @Test("backgrounding cancels analysis and returning resumes it without refetching the library")
     func backgroundCancellation() async throws {
         let service = SuspendedTypeAnalysis()
         let harness = try makeHarness(analysis: service)
@@ -339,6 +339,13 @@ struct TypeGroupingTests {
         await harness.model.reloadLibrary()
         #expect(!harness.model.isAnalyzingTypes)
         #expect(harness.model.analysisResults.isEmpty)
+        let fetches = harness.library.fetchCount
+        harness.model.setForeground(true)
+        await service.waitForRequest()
+        #expect(harness.model.isAnalyzingTypes)
+        #expect(harness.library.fetchCount == fetches)
+        harness.model.setForeground(false)
+        await service.release()
     }
 
     @Test("legacy OCR-incomplete cache is reused without scheduling another scan")
@@ -570,10 +577,14 @@ struct TypeGroupingTests {
     var permission: PhotoPermission = .full
     var failDeletion = false
     var deleted = Set<String>()
+    private(set) var fetchCount = 0
     init(assets: [PhotoAssetDescriptor]) { self.assets = assets }
     func authorizationStatus() -> PhotoPermission { permission }
     func requestAuthorization() async -> PhotoPermission { permission }
-    func fetchAssets() async throws -> [PhotoAssetDescriptor] { assets }
+    func fetchAssets() async throws -> [PhotoAssetDescriptor] {
+        fetchCount += 1
+        return assets
+    }
     func deleteAssets(with identifiers: [String]) async throws -> Set<String> {
         if failDeletion { throw URLError(.cancelled) }
         deleted = Set(identifiers)

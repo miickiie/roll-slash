@@ -55,6 +55,19 @@ creation dates or fingerprints invalidate that result. Metadata groups publish b
 cached similarity matching finishes. Cleanup sessions cache decoded records and index
 work-unit lookup, while draft selections persist separately from the frozen work plan.
 Undo and redo preserve unconfirmed drafts in other comparison sets.
+Type analysis and unresolved place names resume when the app returns to the
+foreground. Photos changes coalesced during favorite updates are refreshed after
+the update cooldown, and favorite reads reuse the loaded library metadata.
+
+Thumbnail, card, and comparison images share an in-memory LRU cache bounded to
+48 MiB of decoded pixels and 96 entries. Navigation stops PhotoKit preheating
+while preserving recently viewed images. Library changes, revoked Photos access,
+and memory warnings invalidate the cache; results from older requests cannot
+repopulate it. Full-resolution images are excluded from this cache.
+The swipe deck keeps the next two still previews and the previous card resident
+so advancing and undo reuse loaded images. The window stops at comparison sets;
+video and Live Photo motion load only when their card becomes active.
+
 Instruments signposts expose Scan, Sizing, Local image, Orientation, Feature print,
 Cache batch, Similar clusters and Type groups under subsystem
 `com.rollslash.app`, category `Photo analysis`. Signposts contain no asset identifiers

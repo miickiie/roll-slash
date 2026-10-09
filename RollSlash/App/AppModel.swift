@@ -243,6 +243,7 @@ final class AppModel {
     var activeSession: CleanupSessionRecord?
     var actions: [CleanupActionRecord] = []
     var isLoading = false
+    private(set) var libraryLoadError: String?
     private(set) var isDeleting = false
     var errorMessage: String?
     var showingSettings = false
@@ -351,6 +352,23 @@ final class AppModel {
         return assetIndex[identifier]
     }
 
+    var swipePreviewAssets: [PhotoAssetDescriptor] {
+        guard let session = activeSession, session.unit(at: session.cursor)?.unit.kind == .swipe else { return [] }
+        let identifiers = session.orderedAssetIDs
+        guard identifiers.indices.contains(session.cursor) else { return [] }
+        var previews: [PhotoAssetDescriptor] = []
+        let previous = session.cursor - 1
+        if previous >= 0, session.unit(at: previous)?.unit.kind == .swipe,
+           let asset = assetIndex[identifiers[previous]] {
+            previews.append(asset)
+        }
+        for index in session.cursor..<min(identifiers.count, session.cursor + 3) {
+            guard session.unit(at: index)?.unit.kind == .swipe else { break }
+            if let asset = assetIndex[identifiers[index]] { previews.append(asset) }
+        }
+        return previews
+    }
+
     var currentComparison: CleanupWorkUnit? {
         guard let session = activeSession, let unit = session.unit(at: session.cursor)?.unit,
               unit.kind == .comparison else { return nil }
@@ -416,7 +434,8 @@ final class AppModel {
     var isPartialAccess: Bool { permission == .limited }
 
     func isFavorite(_ identifier: String) async -> Bool {
-        await photoLibrary.isFavorite(with: identifier)
+        if let asset = assetIndex[identifier] { return asset.isFavorite }
+        return await photoLibrary.isFavorite(with: identifier)
     }
 
     func setFavorite(_ favorite: Bool, for identifier: String) async throws {
@@ -428,6 +447,9 @@ final class AppModel {
                 try? await Task.sleep(for: .milliseconds(1500))
                 guard let self else { return }
                 self.localPhotoChangeDepth = max(0, self.localPhotoChangeDepth - 1)
+                if self.localPhotoChangeDepth == 0, self.libraryChangeCoalesced, self.isForeground {
+                    await self.refreshForForeground()
+                }
             }
         }
         try await photoLibrary.setFavorite(favorite, for: identifier)
@@ -510,6 +532,7 @@ final class AppModel {
             cancelTypeAnalysis()
             previewProvider.stopCachingAll()
             assets = []
+            previewProvider.invalidateCachedImages()
             assetIndex = [:]
             monthGroups = []
             locationGroups = []
@@ -532,6 +555,9 @@ final class AppModel {
 
     func reloadLibrary() async {
         guard permission.canRead else { return }
+        libraryChangeCoalesced = false
+        if let libraryLoadError, errorMessage == libraryLoadError { errorMessage = nil }
+        libraryLoadError = nil
         cancelTypeAnalysis()
         libraryReloadGeneration += 1
         let generation = libraryReloadGeneration
@@ -583,7 +609,10 @@ final class AppModel {
                 preheatAroundCurrentAsset()
             }
         } catch {
-            if generation == libraryReloadGeneration { errorMessage = error.localizedDescription }
+            if generation == libraryReloadGeneration {
+                libraryLoadError = error.localizedDescription
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -971,6 +1000,11 @@ final class AppModel {
         monthGroups = result.month
         locationGroups = result.location
         typeGroups = result.type
+        reconcileSelectedGroups()
+    }
+
+    private func reconcileSelectedGroups() {
+        selectedGroupIDs.formIntersection(Set(visibleGroups.map(\.id)))
     }
 
     private func completionSnapshots() throws -> [String: GroupCompletionSnapshot] {
@@ -1092,11 +1126,20 @@ final class AppModel {
         guard !Task.isCancelled, generation == typeAnalysisGeneration, groupGeneration == groupBuildGeneration,
               permission.canRead, grouping == .type, route == .dashboard else { return }
         typeGroups = groups
+        reconcileSelectedGroups()
     }
 
     func setForeground(_ active: Bool) {
+        guard isForeground != active else { return }
         isForeground = active
-        if !active { cancelTypeAnalysis() }
+        if active {
+            startTypeAnalysis()
+            if grouping == .location { resolveMissingLocations() }
+        } else {
+            cancelTypeAnalysis()
+            locationResolutionTask?.cancel()
+            locationResolutionTask = nil
+        }
     }
 
     private func startTypeAnalysis() {
@@ -1314,7 +1357,7 @@ final class AppModel {
     }
 
     private func resolveMissingLocations() {
-        guard grouping == .location, route == .dashboard, permission.canRead else { return }
+        guard isForeground, grouping == .location, route == .dashboard, permission.canRead else { return }
         locationResolutionTask?.cancel()
         let buckets = Dictionary(grouping: assets.compactMap { asset -> (String, GeoCoordinate)? in
             guard let coordinate = asset.coordinate else { return nil }

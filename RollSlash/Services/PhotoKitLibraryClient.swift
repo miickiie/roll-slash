@@ -7,6 +7,7 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
     var onLibraryChange: (@MainActor @Sendable () -> Void)?
     private var isObservingChanges = false
     private var selfieIDs: Set<String>?
+    private var libraryChangeGeneration = 0
 
     override init() {
         super.init()
@@ -36,6 +37,7 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
     func fetchAssets() async throws -> [PhotoAssetDescriptor] {
         guard authorizationStatus().canRead else { return [] }
         let knownSelfieIDs = selfieIDs
+        let generation = libraryChangeGeneration
         let fetched = await Task.detached(priority: .userInitiated) { () -> (assets: [PhotoAssetDescriptor], selfieIDs: Set<String>, resolvedSelfies: Bool) in
             let collections = PHAssetCollection.fetchAssetCollections(
                 with: .smartAlbum,
@@ -93,7 +95,7 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
             }
             return (descriptors, selfieIDs, true)
         }.value
-        if knownSelfieIDs == nil, fetched.resolvedSelfies {
+        if generation == libraryChangeGeneration, knownSelfieIDs == nil, fetched.resolvedSelfies {
             selfieIDs = fetched.selfieIDs
         }
         return fetched.assets
@@ -215,6 +217,7 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
 extension PhotoKitLibraryClient: PHPhotoLibraryChangeObserver {
     nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
         Task { @MainActor [weak self] in
+            self?.libraryChangeGeneration += 1
             self?.selfieIDs = nil
             self?.onLibraryChange?()
         }

@@ -6,10 +6,10 @@ struct CleanupView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dragOffset: CGSize = .zero
+    @State private var decisionAssetID: String?
     @State private var isDecisionLocked = false
     @State private var actionStamp: ActionStamp?
     @State private var actionTask: Task<Void, Never>?
-    @State private var unlockTask: Task<Void, Never>?
     @State private var showingReviewNowConfirmation = false
     @State private var pendingReviewCurrentBatch = false
     @State private var previewAsset: PhotoAssetDescriptor?
@@ -37,15 +37,15 @@ struct CleanupView: View {
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 10)
-            if let previewAsset {
+            if let previewAsset, let currentPreview = appModel.assetIndex[previewAsset.id] {
                 GeometryReader { geometry in
                     let viewport = CGSize(
                         width: geometry.size.width,
                         height: geometry.size.height + geometry.safeAreaInsets.top + geometry.safeAreaInsets.bottom
                     )
                     MediaViewer(
-                        asset: previewAsset,
-                        initialImage: previewImage,
+                        asset: currentPreview,
+                        initialImage: currentPreview.modificationDate == previewAsset.modificationDate ? previewImage : nil,
                         onDismissSwipe: { translation in
                             dismissPreview(toward: translation, viewport: viewport)
                         },
@@ -73,9 +73,11 @@ struct CleanupView: View {
         .onDisappear {
             actionGeneration = UUID()
             actionTask?.cancel()
-            unlockTask?.cancel()
             actionStamp = nil
             isDecisionLocked = false
+        }
+        .onChange(of: previewAsset.map { appModel.assetIndex[$0.id] == nil }) { _, missing in
+            if missing == true { finishPreviewDismissal() }
         }
     }
 
@@ -228,20 +230,22 @@ struct CleanupView: View {
         }
 
         pulse(decision == .keep ? .success : .warning)
+        decisionAssetID = assetID
         isDecisionLocked = true
-        withAnimation(.snappy) {
+        withAnimation(.snappy(duration: 0.25)) {
             dragOffset.width = decision == .keep ? 700 : -700
         } completion: {
-            dragOffset = .zero
             if appModel.route == .cleanup,
                appModel.activeSession?.identifier == sessionID,
                appModel.currentAsset?.id == assetID {
                 Task {
                     await appModel.decide(decision)
-                    unlockDecisionAfterTransition()
+                    dragOffset = .zero
+                    finishDecision()
                 }
             } else {
-                unlockDecisionAfterTransition()
+                dragOffset = .zero
+                finishDecision()
             }
         }
     }
@@ -275,7 +279,7 @@ struct CleanupView: View {
             if appModel.route == .cleanup, isStillValid() {
                 await perform()
             }
-            unlockDecisionAfterTransition()
+            finishDecision()
         }
     }
 
@@ -283,64 +287,70 @@ struct CleanupView: View {
         hapticPulse = HapticPulse(id: hapticPulse.id + 1, kind: kind)
     }
 
-    private func unlockDecisionAfterTransition() {
-        unlockTask?.cancel()
-        unlockTask = Task { @MainActor in
-            do {
-                try await Task.sleep(for: .milliseconds(300))
-            } catch {
-                return
-            }
-            isDecisionLocked = false
-        }
+    private func finishDecision() {
+        decisionAssetID = nil
+        isDecisionLocked = false
     }
 
     private var deck: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 30).fill(.white.opacity(0.08)).offset(y: 12).scaleEffect(0.94)
             RoundedRectangle(cornerRadius: 30).fill(.white.opacity(0.12)).offset(y: 6).scaleEffect(0.97)
-            if let asset = appModel.currentAsset {
-                MediaCardView(
-                    asset: asset,
-                    onPhotoTap: undoFromPhoto,
-                    onOpenPreview: { image in openPreview(asset, image: image) },
-                    isPreviewOpen: previewAsset != nil
-                )
-                    .id(asset.id)
-                    .offset(dragOffset)
-                    .rotationEffect(.degrees(Double(dragOffset.width / 22)))
-                    .overlay(alignment: dragOffset.width >= 0 ? .topLeading : .topTrailing) {
-                        if abs(dragOffset.width) > 35 {
-                            SwipeStamp(action: dragOffset.width > 0 ? .keep : .delete)
-                                .padding(24)
-                                .opacity(min(1, abs(dragOffset.width) / 110))
-                                .allowsHitTesting(false)
-                        }
-                    }
-                    .overlay {
-                        if let actionStamp {
-                            SwipeStamp(action: actionStamp)
-                                .transition(.opacity.combined(with: .scale(scale: 0.9)))
-                                .allowsHitTesting(false)
-                        }
-                    }
-                    .gesture(
-                        DragGesture(minimumDistance: 12)
-                            .onChanged { if !isDecisionLocked { dragOffset = $0.translation } }
-                            .onEnded { value in
-                                guard !isDecisionLocked else { return }
-                                if let decision = CleanupSwipe.decision(
-                                    translation: value.translation,
-                                    predictedEnd: value.predictedEndTranslation
-                                ) {
-                                    commitDecision(decision, for: asset.id)
-                                } else {
-                                    withAnimation(reduceMotion ? nil : .snappy) { dragOffset = .zero }
-                                }
-                            }
+            if let current = appModel.currentAsset {
+                let previews = appModel.swipePreviewAssets
+                let nextID = previews.drop(while: { $0.id != current.id }).dropFirst().first?.id
+                ForEach(previews) { asset in
+                    let isActive = asset.id == current.id
+                    let isNext = asset.id == nextID
+                    let offset = isActive && (!isDecisionLocked || decisionAssetID == asset.id) ? dragOffset : .zero
+                    MediaCardView(
+                        asset: asset,
+                        onPhotoTap: undoFromPhoto,
+                        onOpenPreview: { image in openPreview(asset, image: image) },
+                        isPreviewOpen: previewAsset != nil,
+                        isActive: isActive
                     )
-                    .accessibilityAction(named: "Keep") { decideFromButton(.keep) }
-                    .accessibilityAction(named: "Delete") { decideFromButton(.deletePending) }
+                        .opacity(isActive || isNext ? 1 : 0)
+                        .zIndex(isActive ? 2 : (isNext ? 1 : 0))
+                        .scaleEffect(isNext ? 0.97 : 1)
+                        .offset(y: isNext ? 6 : 0)
+                        .offset(offset)
+                        .rotationEffect(.degrees(Double(offset.width / 22)))
+                        .overlay(alignment: offset.width >= 0 ? .topLeading : .topTrailing) {
+                            if isActive && abs(offset.width) > 35 {
+                                SwipeStamp(action: offset.width > 0 ? .keep : .delete)
+                                    .padding(24)
+                                    .opacity(min(1, abs(offset.width) / 110))
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                        .overlay {
+                            if isActive, let actionStamp {
+                                SwipeStamp(action: actionStamp)
+                                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                        .gesture(
+                            DragGesture(minimumDistance: 12)
+                                .onChanged { if isActive && !isDecisionLocked { dragOffset = $0.translation } }
+                                .onEnded { value in
+                                    guard isActive, !isDecisionLocked else { return }
+                                    if let decision = CleanupSwipe.decision(
+                                        translation: value.translation,
+                                        predictedEnd: value.predictedEndTranslation
+                                    ) {
+                                        commitDecision(decision, for: asset.id)
+                                    } else {
+                                        withAnimation(reduceMotion ? nil : .snappy) { dragOffset = .zero }
+                                    }
+                                }
+                        )
+                        .accessibilityAction(named: "Keep") { if isActive { decideFromButton(.keep) } }
+                        .accessibilityAction(named: "Delete") { if isActive { decideFromButton(.deletePending) } }
+                        .allowsHitTesting(isActive)
+                        .accessibilityHidden(!isActive)
+                }
             } else {
                 unavailableCard
             }
@@ -524,6 +534,7 @@ struct MediaCardView: View {
     let onPhotoTap: () -> Void
     let onOpenPreview: (UIImage?) -> Void
     let isPreviewOpen: Bool
+    var isActive = true
 
     @State private var image: UIImage?
     @State private var livePhoto: PHLivePhoto?
@@ -533,6 +544,12 @@ struct MediaCardView: View {
     @State private var failed = false
     @State private var isVisible = false
     @State private var retryCount = 0
+    @State private var loadedRequest: PreviewImageRequest?
+
+    private struct MotionRequest: Hashable {
+        let preview: PreviewImageRequest?
+        let isActive: Bool
+    }
 
     var body: some View {
         let request = PreviewImageRequest(identifier: asset.id, modificationDate: asset.modificationDate,
@@ -541,7 +558,7 @@ struct MediaCardView: View {
             ZStack {
                 Color.black
                 media
-                if failed {
+                if isActive && failed {
                     ContentUnavailableView {
                         Label("Preview unavailable", systemImage: "icloud.slash")
                     } description: {
@@ -551,55 +568,61 @@ struct MediaCardView: View {
                     }
                     .foregroundStyle(.white)
                 }
-                VStack {
-                    HStack {
-                        mediaBadge
-                        Spacer()
-                        Button("Open full-screen preview", systemImage: "arrow.up.left.and.arrow.down.right") {
-                            onOpenPreview(image)
-                        }
-                        .labelStyle(.iconOnly)
-                        .buttonStyle(.glass)
-                        .accessibilityIdentifier("open-media-viewer")
-                        .accessibilityHint("Opens a preview where you can zoom and inspect details.")
-                        if asset.mediaKind == .video {
-                            Button(isMuted ? "Unmute" : "Mute", systemImage: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") {
-                                isMuted.toggle()
-                                player?.isMuted = isMuted
+                if isActive {
+                    VStack {
+                        HStack {
+                            mediaBadge
+                            Spacer()
+                            Button("Open full-screen preview", systemImage: "arrow.up.left.and.arrow.down.right") {
+                                onOpenPreview(image)
                             }
                             .labelStyle(.iconOnly)
                             .buttonStyle(.glass)
+                            .accessibilityIdentifier("open-media-viewer")
+                            .accessibilityHint("Opens a preview where you can zoom and inspect details.")
+                            if asset.mediaKind == .video {
+                                Button(isMuted ? "Unmute" : "Mute", systemImage: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") {
+                                    isMuted.toggle()
+                                    player?.isMuted = isMuted
+                                }
+                                .labelStyle(.iconOnly)
+                                .buttonStyle(.glass)
+                            }
+                        }
+                        Spacer()
+                        if let date = asset.creationDate {
+                            Text(date.formatted(date: .abbreviated, time: .shortened))
+                                .font(.caption.bold())
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .background(.black.opacity(0.5), in: .capsule)
                         }
                     }
-                    Spacer()
-                    if let date = asset.creationDate {
-                        Text(date.formatted(date: .abbreviated, time: .shortened))
-                            .font(.caption.bold())
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
-                            .background(.black.opacity(0.5), in: .capsule)
-                    }
+                    .padding(14)
                 }
-                .padding(14)
             }
             .clipShape(.rect(cornerRadius: 30))
-            .task(id: request) { await load(request: request) }
+            .task(id: request) { await loadImage(request: request) }
+            .task(id: MotionRequest(preview: loadedRequest, isActive: isActive && !isPreviewOpen)) {
+                await loadMotion()
+            }
             .onAppear {
                 isVisible = true
-                if asset.mediaKind == .video && !isPreviewOpen { player?.play() }
+                updatePlayback()
             }
             .onDisappear {
                 isVisible = false
                 player?.pause()
+                isLivePlaying = false
             }
-            .onChange(of: isPreviewOpen) { _, isOpen in
-                if isOpen { player?.pause() }
-                else if isVisible && asset.mediaKind == .video { player?.play() }
-            }
+            .onChange(of: isPreviewOpen) { _, _ in updatePlayback() }
+            .onChange(of: isActive) { _, _ in updatePlayback() }
             .onLongPressGesture(minimumDuration: 0.1, pressing: { pressing in
-                guard asset.mediaKind == .livePhoto else { return }
+                guard isActive, !isPreviewOpen, asset.mediaKind == .livePhoto else { return }
                 isLivePlaying = pressing
             }, perform: {})
+            .allowsHitTesting(isActive)
+            .accessibilityHidden(!isActive)
         }
     }
 
@@ -609,7 +632,7 @@ struct MediaCardView: View {
         case .photo:
             if let image { photoImage(image) } else { loading }
         case .livePhoto:
-            if let livePhoto {
+            if isActive, let livePhoto {
                 photoContent(size: image?.size ?? CGSize(width: CGFloat(asset.pixelWidth), height: CGFloat(asset.pixelHeight))) {
                     LivePhotoPlayer(photo: livePhoto, isPlaying: isLivePlaying)
                 }
@@ -619,9 +642,9 @@ struct MediaCardView: View {
                 loading
             }
         case .video:
-            if let player {
+            if isActive, let player {
                 VideoPlayer(player: player)
-                    .onAppear { if !isPreviewOpen { player.play() } }
+                    .onAppear { updatePlayback() }
             } else if let image {
                 Image(uiImage: image).resizable().scaledToFit()
             } else {
@@ -643,12 +666,13 @@ struct MediaCardView: View {
             content()
                 .frame(width: fittedSize.width, height: fittedSize.height)
                 .contentShape(Rectangle())
-                .simultaneousGesture(TapGesture().onEnded { onPhotoTap() })
-                .accessibilityIdentifier("cleanup-photo-surface")
+                .simultaneousGesture(TapGesture().onEnded { if isActive { onPhotoTap() } })
+                .accessibilityIdentifier(isActive ? "cleanup-photo-surface" : "preloaded-photo-\(asset.id)")
                 .accessibilityLabel("Current photo")
                 .accessibilityHint("Tap to undo the previous decision")
-                .accessibilityAction(named: "Undo") { onPhotoTap() }
+                .accessibilityAction(named: "Undo") { if isActive { onPhotoTap() } }
                 .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+                .accessibilityHidden(!isActive)
         }
     }
 
@@ -657,6 +681,7 @@ struct MediaCardView: View {
             ProgressView().tint(.white)
             Text("Loading preview…").font(.caption).foregroundStyle(.white.opacity(0.7))
         }
+        .accessibilityIdentifier("cleanup-card-loading")
     }
 
     @ViewBuilder
@@ -682,39 +707,60 @@ struct MediaCardView: View {
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 
-    private func load(request: PreviewImageRequest) async {
+    private func loadImage(request: PreviewImageRequest) async {
         player?.pause()
         player = nil
         image = nil
         livePhoto = nil
+        loadedRequest = nil
         isLivePlaying = false
         failed = false
-        let target = request.targetSize
+        let loadedImage = await appModel.previewProvider.image(
+            for: asset.id, targetSize: request.targetSize, kind: .active
+        )
+        guard !Task.isCancelled else { return }
+        image = loadedImage
+        failed = asset.mediaKind == .photo && loadedImage == nil
+        loadedRequest = request
+    }
+
+    private func loadMotion() async {
+        guard isActive, !isPreviewOpen, let request = loadedRequest else {
+            updatePlayback()
+            return
+        }
         switch asset.mediaKind {
-        case .photo, .livePhoto:
-            let loadedImage = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active)
-            guard !Task.isCancelled else { return }
-            image = loadedImage
-            if asset.mediaKind == .livePhoto {
-                let loadedLivePhoto = await appModel.previewProvider.livePhoto(for: asset.id, targetSize: target)
-                guard !Task.isCancelled else { return }
-                livePhoto = loadedLivePhoto
-            }
+        case .photo:
+            return
+        case .livePhoto:
+            if livePhoto != nil { return }
+            let motion = await appModel.previewProvider.livePhoto(for: asset.id, targetSize: request.targetSize)
+            guard !Task.isCancelled, request == loadedRequest else { return }
+            livePhoto = motion
         case .video:
+            if player != nil {
+                updatePlayback()
+                return
+            }
             let item = await appModel.previewProvider.playerItem(for: asset.id)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, request == loadedRequest else { return }
             if let item {
                 let player = AVPlayer(playerItem: item)
                 player.isMuted = isMuted
                 self.player = player
-                if isVisible && !isPreviewOpen { player.play() }
-            } else {
-                let loadedImage = await appModel.previewProvider.image(for: asset.id, targetSize: target, kind: .active)
-                guard !Task.isCancelled else { return }
-                image = loadedImage
+                updatePlayback()
             }
         }
         failed = image == nil && livePhoto == nil && player == nil
+    }
+
+    private func updatePlayback() {
+        if isActive && isVisible && !isPreviewOpen {
+            player?.play()
+        } else {
+            player?.pause()
+            isLivePlaying = false
+        }
     }
 }
 

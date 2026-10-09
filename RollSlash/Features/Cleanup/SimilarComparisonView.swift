@@ -213,6 +213,7 @@ private struct ComparisonPhotoImage: View {
         }
         .task(id: request) {
             loaded = false
+            image = nil
             let result = await appModel.previewProvider.image(
                 for: request.id, targetSize: CGSize(width: request.pixels, height: request.pixels), kind: .comparison
             )
