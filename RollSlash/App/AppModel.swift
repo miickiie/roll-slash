@@ -254,6 +254,7 @@ final class AppModel {
     @ObservationIgnored private let locationResolver: any LocationResolver
     @ObservationIgnored private let repository: any CleanupRepository
     @ObservationIgnored private let analysisClient: any MediaAnalysisClient
+    @ObservationIgnored private let onboardingDefaults: UserDefaults
     @ObservationIgnored private var typeAnalysisTask: Task<Void, Never>?
     @ObservationIgnored private var typeAnalysisGeneration = 0
     @ObservationIgnored private var analysisCacheBuffer: [String: MediaAnalysisCacheEntry] = [:]
@@ -275,16 +276,26 @@ final class AppModel {
         previewProvider: any MediaPreviewProvider,
         locationResolver: any LocationResolver,
         modelContainer: ModelContainer,
-        analysisClient: any MediaAnalysisClient = PhotoKitMediaAnalysisClient()
+        analysisClient: any MediaAnalysisClient = PhotoKitMediaAnalysisClient(),
+        onboardingDefaults: UserDefaults = .standard
     ) {
         self.photoLibrary = photoLibrary
         self.previewProvider = previewProvider
         self.locationResolver = locationResolver
         self.repository = SwiftDataCleanupRepository(container: modelContainer)
         self.analysisClient = analysisClient
+        self.onboardingDefaults = onboardingDefaults
         let cleanupMetricsStore = CleanupMetricsStore()
         self.cleanupMetricsStore = cleanupMetricsStore
         self.lifetimeCleanupSummary = cleanupMetricsStore.summary()
+        self.permission = photoLibrary.authorizationStatus()
+        self.route = initialRoute(for: permission)
+        self.isLoading = permission.canRead
+    }
+
+    private func initialRoute(for permission: PhotoPermission) -> AppRoute {
+        permission == .notDetermined && !onboardingDefaults.bool(forKey: "hasSeenOnboarding")
+            ? .onboarding : .dashboard
     }
 
     var visibleGroups: [MediaGroup] {
@@ -447,26 +458,22 @@ final class AppModel {
             Task { await self.reloadLibrary() }
         }
         permission = photoLibrary.authorizationStatus()
+        isLoading = permission.canRead
 
         if let session = try? repository.activeSession() {
             activeSession = session
             actions = (try? repository.actions(for: session.identifier)) ?? []
         }
 
-        let hasSeenOnboarding = UserDefaults.standard.bool(forKey: "hasSeenOnboarding")
-        if permission == .notDetermined && !hasSeenOnboarding {
-            route = .onboarding
-        } else {
-            route = .dashboard
-            if permission.canRead {
-                photoLibrary.startObservingChanges()
-                await reloadLibrary()
-            }
+        route = initialRoute(for: permission)
+        if route == .dashboard, permission.canRead {
+            photoLibrary.startObservingChanges()
+            await reloadLibrary()
         }
     }
 
     func requestAccess() async {
-        UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
+        onboardingDefaults.set(true, forKey: "hasSeenOnboarding")
         permission = await photoLibrary.requestAuthorization()
         route = .dashboard
         if permission.canRead {
@@ -517,7 +524,7 @@ final class AppModel {
     }
 
     func continueWithoutAccess() {
-        UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
+        onboardingDefaults.set(true, forKey: "hasSeenOnboarding")
         permission = photoLibrary.authorizationStatus()
         route = .dashboard
         if permission.canRead { photoLibrary.startObservingChanges() }

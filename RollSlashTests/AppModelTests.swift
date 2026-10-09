@@ -520,7 +520,60 @@ struct AppModelTests {
         #expect(memory.monthID == "month:2020-03")
     }
 
-    private func makeHarness(failDeletion: Bool = false) throws -> Harness {
+    @Test("startup shows onboarding only before the first onboarding choice")
+    func startupRespectsOnboardingChoice() async throws {
+        let suiteName = "AppModelTests.startup.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let firstLaunch = try makeHarness(permission: .notDetermined, onboardingDefaults: defaults)
+        #expect(firstLaunch.model.route == .onboarding)
+        #expect(!firstLaunch.model.isLoading)
+        firstLaunch.model.continueWithoutAccess()
+
+        let returningLaunch = try makeHarness(permission: .notDetermined, onboardingDefaults: defaults)
+        #expect(returningLaunch.model.route == .dashboard)
+        #expect(!returningLaunch.model.isLoading)
+        await returningLaunch.model.start()
+        #expect(returningLaunch.model.route == .dashboard)
+    }
+
+    @Test("startup uses existing Photos permission before loading the library")
+    func startupUsesCurrentPhotoPermission() throws {
+        let suiteName = "AppModelTests.startup.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        for permission in [PhotoPermission.full, .limited, .denied, .restricted] {
+            let harness = try makeHarness(permission: permission, onboardingDefaults: defaults)
+            #expect(harness.model.route == .dashboard)
+            #expect(harness.model.permission == permission)
+            #expect(harness.model.isLoading == permission.canRead)
+            #expect(harness.client.fetchCallCount == 0)
+        }
+    }
+
+    @Test("startup clears loading when Photos access changes before startup completes")
+    func startupRechecksPhotoPermission() async throws {
+        let suiteName = "AppModelTests.startup.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let harness = try makeHarness(onboardingDefaults: defaults)
+        #expect(harness.model.isLoading)
+        harness.client.permission = .denied
+        await harness.model.start()
+        #expect(harness.model.route == .dashboard)
+        #expect(harness.model.permission == .denied)
+        #expect(!harness.model.isLoading)
+        #expect(harness.client.fetchCallCount == 0)
+    }
+
+    private func makeHarness(
+        failDeletion: Bool = false,
+        permission: PhotoPermission = .full,
+        onboardingDefaults: UserDefaults = .standard
+    ) throws -> Harness {
         let calendar = Calendar(identifier: .gregorian)
         let assets = [
             makeAsset(id: "jan-new", date: calendar.date(from: DateComponents(year: 2026, month: 1, day: 20))!),
@@ -528,6 +581,7 @@ struct AppModelTests {
             makeAsset(id: "feb", date: calendar.date(from: DateComponents(year: 2026, month: 2, day: 4))!)
         ]
         let client = TestPhotoLibraryClient(assets: assets, shouldFailDeletion: failDeletion)
+        client.permission = permission
         let container = try ModelContainer(
             for: RollSlashSchema.schema,
             configurations: [ModelConfiguration(isStoredInMemoryOnly: true)]
@@ -536,7 +590,8 @@ struct AppModelTests {
             photoLibrary: client,
             previewProvider: TestPreviewProvider(),
             locationResolver: TestLocationResolver(),
-            modelContainer: container
+            modelContainer: container,
+            onboardingDefaults: onboardingDefaults
         )
         return Harness(model: model, client: client, container: container)
     }
