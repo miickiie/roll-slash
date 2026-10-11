@@ -94,8 +94,8 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Section("About") {
-                    LabeledContent("Roll Slash", value: "1.0")
-                    Text("Built with 💜 by Miickiie")
+                    LabeledContent("Roll Slash", value: "1.4")
+                    Link("Built with 💜 by Miickiie", destination: URL(string: "https://www.instagram.com/miiickiie")!)
                 }
             }
             .navigationTitle("Settings")
