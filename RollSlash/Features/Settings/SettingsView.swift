@@ -6,6 +6,7 @@ struct SettingsView: View {
     @State private var confirmingReset = false
     @State private var showingResetSuccess = false
     @State private var mascotPeekID = 0
+    @State private var settingsDragStarted = false
 
     var body: some View {
         NavigationStack {
@@ -13,9 +14,13 @@ struct SettingsView: View {
                 Section("Photo Access") {
                     LabeledContent("Status", value: permissionLabel)
                     if appModel.permission == .limited {
-                        Button("Choose More Photos") { appModel.presentLimitedLibraryPicker() }
+                        Button("Choose More Photos") {
+                            appModel.presentLimitedLibraryPicker()
+                        }
                     }
-                    Button("Open iOS Settings") { appModel.openSystemSettings() }
+                    Button("Open iOS Settings") {
+                        appModel.openSystemSettings()
+                    }
                 }
                 Section("Privacy") {
                     Label("Roll Slash stores decisions, cleanup totals, cached place names, and photo analysis results on this iPhone.", systemImage: "iphone")
@@ -57,7 +62,9 @@ struct SettingsView: View {
                                         .font(.subheadline)
                                         .foregroundStyle(.secondary)
                                     PopupActionRow {
-                                        Button("Keep History") { confirmingReset = false }
+                                        Button("Keep History") {
+                                            confirmingReset = false
+                                        }
                                             .buttonStyle(.bordered)
                                     } confirm: {
                                         Button("Reset History", role: .destructive) {
@@ -95,64 +102,45 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("About")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .textCase(nil)
-                            .accessibilityAddTraits(.isHeader)
-                            .padding(.horizontal, 32)
+                    LabeledContent("Roll Slash", value: "1.4")
 
-                        ZStack(alignment: .topTrailing) {
+                    Link("Built with 💜 by Miickiie", destination: URL(string: "https://www.instagram.com/miiickiie")!)
+                } header: {
+                    Text("About")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(alignment: .bottomTrailing) {
                             AboutMascotPeek(actionID: mascotPeekID)
-                                .offset(x: -8, y: -38)
-                                .zIndex(0)
-
-                            VStack(spacing: 0) {
-                                Button {
-                                    mascotPeekID &+= 1
-                                } label: {
-                                    LabeledContent("Roll Slash", value: "1.4")
-                                        .padding(.horizontal, 32)
-                                        .frame(minHeight: 56)
-                                        .contentShape(Rectangle())
-                                }
-                                .accessibilityElement(children: .combine)
-                                .buttonStyle(.plain)
-
-                                Divider()
-                                    .padding(.horizontal, 32)
-
-                                Link("Built with 💜 by Miickiie", destination: URL(string: "https://www.instagram.com/miiickiie")!)
-                                    .padding(.horizontal, 32)
-                                    .frame(minHeight: 56)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .background(
-                                Color(uiColor: .secondarySystemGroupedBackground),
-                                in: RoundedRectangle(cornerRadius: 28, style: .continuous)
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-                            .zIndex(1)
+                                .offset(y: 10)
+                                .padding(.trailing, 8)
                         }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-                    .padding(.vertical, 8)
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
                 }
             }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8)
+                    .onChanged { _ in
+                        guard !settingsDragStarted else { return }
+                        settingsDragStarted = true
+                        triggerMascotPeek()
+                    }
+                    .onEnded { _ in
+                        settingsDragStarted = false
+                    }
+            )
             .navigationTitle("Settings")
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
             }
             .alert("Roll Slash", isPresented: Binding(
                 get: { appModel.errorMessage != nil },
                 set: { if !$0 { appModel.errorMessage = nil } }
             )) {
-                Button("OK", role: .cancel) { appModel.errorMessage = nil }
+                Button("OK", role: .cancel) {
+                    appModel.errorMessage = nil
+                }
             } message: {
                 Text(appModel.errorMessage ?? "")
             }
@@ -168,6 +156,10 @@ struct SettingsView: View {
         case .full: String(localized: "Full access")
         }
     }
+
+    private func triggerMascotPeek() {
+        mascotPeekID &+= 1
+    }
 }
 
 private struct AboutMascotPeek: View {
@@ -180,7 +172,8 @@ private struct AboutMascotPeek: View {
     var body: some View {
         RollSlashMascotFace()
             .offset(y: isVisible ? 0 : 60)
-            .frame(width: 56, height: 56)
+            .frame(width: 56, height: 34, alignment: .top)
+            .clipped()
             .accessibilityHidden(true)
             .allowsHitTesting(false)
             .onChange(of: actionID) { _, _ in
