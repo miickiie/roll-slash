@@ -89,6 +89,72 @@ final class RollSlashUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Freshly slashed"].waitForExistence(timeout: 3))
     }
 
+    func testFinalReviewPreviewVerticalSwipesDismissAndPreserveChoices() {
+        let app = XCUIApplication()
+        app.launchArguments.append("--ui-testing")
+        app.launch()
+        for month in ["2026-08", "2026-07"] {
+            let group = app.buttons["group-row-month:\(month)"]
+            XCTAssertTrue(group.waitForExistence(timeout: 5))
+            group.tap()
+        }
+        app.buttons["clean-selected"].tap()
+        for _ in 0..<2 {
+            let delete = app.buttons["decision-delete"]
+            XCTAssertTrue(delete.waitForExistence(timeout: 3))
+            XCTAssertTrue(waitUntilEnabled(delete))
+            delete.tap()
+        }
+        XCTAssertTrue(app.navigationBars["Final review"].waitForExistence(timeout: 3))
+        let preview = app.buttons["review-preview-demo-1"]
+        XCTAssertTrue(preview.waitForExistence(timeout: 3))
+
+        for direction in 0..<2 {
+            preview.tap()
+            let close = app.buttons["close-media-viewer"]
+            XCTAssertTrue(close.waitForExistence(timeout: 3))
+            XCTAssertEqual(app.staticTexts["review-viewer-position"].label, "1 of 2")
+            if direction == 0 { app.buttons["review-viewer-toggle"].tap() }
+            app.swipeLeft()
+            XCTAssertEqual(app.staticTexts["review-viewer-position"].label, "2 of 2")
+            XCTAssertTrue(close.exists, "Horizontal swipes must navigate without dismissing")
+            app.swipeRight()
+            XCTAssertEqual(app.staticTexts["review-viewer-position"].label, "1 of 2")
+            XCTAssertEqual(app.buttons["review-viewer-toggle"].label, "Kept item")
+            if direction == 0 { app.swipeUp() } else { app.swipeDown() }
+            let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: close)
+            XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 3), .completed)
+            XCTAssertTrue(app.buttons["commit-deletion"].isHittable)
+            XCTAssertEqual(app.buttons["review-selection-demo-1"].value as? String, "Not selected")
+            XCTAssertEqual(app.buttons["review-selection-demo-2"].value as? String, "Selected")
+            XCTAssertTrue(app.staticTexts["1 selected for deletion"].exists)
+        }
+
+        preview.tap()
+        let close = app.buttons["close-media-viewer"]
+        XCTAssertTrue(close.waitForExistence(timeout: 3))
+        let center = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        center.doubleTap()
+        app.swipeUp()
+        XCTAssertTrue(close.exists, "Vertical swipes must pan a zoomed photo")
+        app.swipeDown()
+        XCTAssertTrue(close.exists)
+        XCTAssertEqual(app.staticTexts["review-viewer-position"].label, "1 of 2")
+        center.doubleTap()
+        app.swipeDown()
+        let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: close)
+        XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 3), .completed)
+        XCTAssertTrue(app.staticTexts["1 selected for deletion"].exists)
+
+        preview.tap()
+        XCTAssertTrue(close.waitForExistence(timeout: 3))
+        saveScreenshot(app, name: "Final review photo preview with preserved choices")
+        close.tap()
+        let closedByButton = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: close)
+        XCTAssertEqual(XCTWaiter.wait(for: [closedByButton], timeout: 3), .completed)
+        XCTAssertTrue(app.staticTexts["1 selected for deletion"].exists)
+    }
+
     func testFullScreenViewerOpensAndDismisses() {
         let app = XCUIApplication()
         app.launchArguments.append("--ui-testing")
@@ -491,6 +557,44 @@ final class RollSlashUITests: XCTestCase {
         saveScreenshot(app, name: "Two-column comparison at accessibility text size")
     }
 
+    func testMonthTitleTapsSelectOnlyTheirOwnCards() {
+        let app = XCUIApplication()
+        app.launchArguments += ["--ui-testing", "--comparison-fixtures"]
+        app.launch()
+        let months = ["2026-09", "2026-08", "2026-07", "2026-06"]
+        let cards = months.map { app.buttons["group-row-month:\($0)"] }
+        XCTAssertTrue(cards[0].waitForExistence(timeout: 5))
+        XCTAssertTrue(cards[3].waitForExistence(timeout: 3))
+        let scroll = app.scrollViews["month-group-list"]
+        for card in cards {
+            XCTAssertGreaterThanOrEqual(card.frame.minX, scroll.frame.minX)
+            XCTAssertLessThanOrEqual(card.frame.maxX, scroll.frame.maxX)
+        }
+        XCTAssertLessThanOrEqual(cards[0].frame.maxX, cards[1].frame.minX)
+        XCTAssertLessThanOrEqual(cards[0].frame.maxY, cards[2].frame.minY)
+        XCTAssertLessThanOrEqual(cards[1].frame.maxY, cards[3].frame.minY)
+
+        for month in months {
+            let title = app.staticTexts["group-title-month:\(month)"]
+            XCTAssertTrue(title.waitForExistence(timeout: 3))
+            let tap = app.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: title.frame.midX, dy: title.frame.midY))
+            tap.tap()
+            let selected = app.buttons["group-row-month:\(month)"]
+            let selection = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "label CONTAINS 'Selected'"), object: selected
+            )
+            XCTAssertEqual(XCTWaiter.wait(for: [selection], timeout: 3), .completed,
+                           "Tapping \(month)'s title must select that card, not the row below")
+            for otherMonth in months where otherMonth != month {
+                XCTAssertFalse(app.buttons["group-row-month:\(otherMonth)"].label.contains("Selected"))
+            }
+            tap.tap()
+            XCTAssertFalse(selected.label.contains("Selected"))
+        }
+        saveScreenshot(app, name: "Month title tap areas stay within their cards")
+    }
+
     func testMonthGroupsAndConfirmationAdaptToAccessibilityTextSize() {
         let app = XCUIApplication()
         app.launchArguments += ["--ui-testing", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
@@ -502,8 +606,8 @@ final class RollSlashUITests: XCTestCase {
         saveScreenshot(app, name: "Month cards at accessibility text size")
         XCTAssertGreaterThan(first.frame.width, app.frame.width / 2)
         XCTAssertEqual(first.frame.minX, second.frame.minX, accuracy: 1)
-        // XCTest includes scaled, clipped thumbnail bounds in a button's frame.
-        XCTAssertLessThan(first.frame.midY, second.frame.midY)
+        XCTAssertLessThanOrEqual(first.frame.maxY, second.frame.minY,
+                                 "Month card tap areas must not overlap the card below")
         let firstYear = app.buttons["Jump to 2026"]
         let secondYear = app.buttons["Jump to 2025"]
         XCTAssertTrue(firstYear.exists)

@@ -102,7 +102,11 @@ struct ReviewView: View {
                 .background(.ultraThinMaterial)
             }
             .fullScreenCover(item: $focusedPreview) { item in
-                ReviewMediaViewer(initialIdentifier: item.id, initialImage: item.image)
+                ReviewMediaViewer(initialIdentifier: item.id, initialImage: item.image) {
+                    var transaction = Transaction(animation: nil)
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) { focusedPreview = nil }
+                }
             }
             .disabled(!appModel.canEditReview)
             .alert("Deletion did not complete", isPresented: Binding(
@@ -124,15 +128,20 @@ private struct PreviewIdentifier: Identifiable {
 
 private struct ReviewMediaViewer: View {
     @Environment(AppModel.self) private var appModel
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let initialIdentifier: String
     let initialImage: UIImage?
+    let onDismiss: () -> Void
     @State private var currentIdentifier: String
+    @State private var exitOffset = CGSize.zero
+    @State private var exitOpacity = 1.0
+    @State private var isDismissing = false
 
-    init(initialIdentifier: String, initialImage: UIImage?) {
+    init(initialIdentifier: String, initialImage: UIImage?, onDismiss: @escaping () -> Void) {
         self.initialIdentifier = initialIdentifier
         self.initialImage = initialImage
+        self.onDismiss = onDismiss
         _currentIdentifier = State(initialValue: initialIdentifier)
     }
 
@@ -155,28 +164,39 @@ private struct ReviewMediaViewer: View {
     }
 
     var body: some View {
-        Group {
-            if let currentAsset, let currentIndex {
-                MediaViewer(
-                    asset: currentAsset,
-                    initialImage: currentIdentifier == initialIdentifier ? initialImage : nil,
-                    onSwipeLeft: advance,
-                    onSwipeRight: goBack
-                )
-                .overlay(alignment: .bottom) {
-                    controls(currentIndex: currentIndex)
+        GeometryReader { geometry in
+            let viewportHeight = geometry.size.height + geometry.safeAreaInsets.top + geometry.safeAreaInsets.bottom
+            Group {
+                if let currentAsset, let currentIndex {
+                    MediaViewer(
+                        asset: currentAsset,
+                        initialImage: currentIdentifier == initialIdentifier ? initialImage : nil,
+                        onSwipeLeft: advance,
+                        onSwipeRight: goBack,
+                        onDismissSwipe: { dismissPreview(toward: $0, viewportHeight: viewportHeight) },
+                        dismissSwipeAxis: .vertical,
+                        onClose: { dismissPreview(toward: CGSize(width: 0, height: 100), viewportHeight: viewportHeight) }
+                    )
+                    .overlay(alignment: .bottom) {
+                        controls(currentIndex: currentIndex)
+                    }
+                } else {
+                    VStack(spacing: 16) {
+                        ContentUnavailableView("Item unavailable", systemImage: "photo.badge.exclamationmark")
+                        Button("Close", action: onDismiss)
+                            .buttonStyle(.borderedProminent)
+                    }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(.black)
                 }
-            } else {
-                VStack(spacing: 16) {
-                    ContentUnavailableView("Item unavailable", systemImage: "photo.badge.exclamationmark")
-                    Button("Close") { dismiss() }
-                        .buttonStyle(.borderedProminent)
-                }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(.black)
             }
+            .offset(exitOffset)
+            .opacity(exitOpacity)
+            .allowsHitTesting(!isDismissing)
         }
+        .presentationBackground(.clear)
+        .interactiveDismissDisabled()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("review-media-viewer")
         .preferredColorScheme(.dark)
@@ -184,6 +204,19 @@ private struct ReviewMediaViewer: View {
         .onAppear { reconcileCurrentAsset() }
         .onChange(of: appModel.reviewCandidateIDs) { _, _ in
             reconcileCurrentAsset()
+        }
+    }
+
+    private func dismissPreview(toward translation: CGSize, viewportHeight: CGFloat) {
+        guard !isDismissing else { return }
+        isDismissing = true
+        guard !reduceMotion else { onDismiss(); return }
+        let direction: CGFloat = translation.height < 0 ? -1 : 1
+        withAnimation(.easeOut(duration: 0.24)) {
+            exitOffset.height = direction * (viewportHeight + abs(translation.height) + 80)
+            exitOpacity = 0
+        } completion: {
+            onDismiss()
         }
     }
 
@@ -252,7 +285,7 @@ private struct ReviewMediaViewer: View {
 
     private func reconcileCurrentAsset() {
         guard !assets.isEmpty else {
-            dismiss()
+            onDismiss()
             return
         }
         guard !assets.contains(where: { $0.id == currentIdentifier }) else { return }
@@ -287,7 +320,7 @@ private struct ReviewTile: View {
                 .clipShape(.rect(cornerRadius: 8))
                 .accessibilityLabel("Preview photo")
                 .accessibilityIdentifier("review-preview-\(identifier)")
-                .accessibilityHint("Opens a full-screen preview. Swipe left for the next item or right for the previous item.")
+                .accessibilityHint("Opens a full-screen preview. Swipe left for the next item, right for the previous item, or up or down to close.")
                 Button(action: toggle) {
                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                         .font(.title3)

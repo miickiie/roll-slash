@@ -989,6 +989,7 @@ private struct MonthGroupCard: View {
                             .font(.headline)
                             .foregroundStyle(.primary)
                             .lineLimit(1)
+                            .accessibilityIdentifier("group-title-\(group.key.id)")
                         if let subtitle = group.subtitle {
                             Text(subtitle)
                                 .font(.caption)
@@ -1015,6 +1016,7 @@ private struct MonthGroupCard: View {
                 RoundedRectangle(cornerRadius: 20)
                     .stroke(selected ? RollSlashTheme.violet : .clear, lineWidth: 2)
             }
+            .contentShape(.rect(cornerRadius: 20))
         }
         .buttonStyle(.plain)
         .frame(minWidth: 0, maxWidth: .infinity, alignment: .top)
@@ -1090,6 +1092,7 @@ private struct GroupRow: View {
                 RoundedRectangle(cornerRadius: 22)
                     .stroke(selected ? RollSlashTheme.violet : .clear, lineWidth: 2)
             }
+            .contentShape(.rect(cornerRadius: 22))
         }
         .buttonStyle(.plain)
         .disabled(group.totalCount == 0)

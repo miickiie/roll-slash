@@ -19,10 +19,12 @@ struct MediaThumbnailView: View {
         ZStack {
             Rectangle().fill(.quaternary)
             if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                GeometryReader { geometry in
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                }
             } else if identifier == nil {
                 Image(systemName: "sparkles")
                     .foregroundStyle(.secondary)
@@ -35,6 +37,7 @@ struct MediaThumbnailView: View {
             }
         }
         .clipped()
+        .contentShape(.rect)
         .accessibilityHidden(true)
         .task(id: request) {
             image = nil
