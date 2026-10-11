@@ -5,6 +5,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var confirmingReset = false
     @State private var showingResetSuccess = false
+    @State private var mascotPeekID = 0
 
     var body: some View {
         NavigationStack {
@@ -93,9 +94,54 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Section("About") {
-                    LabeledContent("Roll Slash", value: "1.4")
-                    Link("Built with 💜 by Miickiie", destination: URL(string: "https://www.instagram.com/miiickiie")!)
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("About")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .textCase(nil)
+                            .accessibilityAddTraits(.isHeader)
+                            .padding(.horizontal, 32)
+
+                        ZStack(alignment: .topTrailing) {
+                            AboutMascotPeek(actionID: mascotPeekID)
+                                .offset(x: -8, y: -38)
+                                .zIndex(0)
+
+                            VStack(spacing: 0) {
+                                Button {
+                                    mascotPeekID &+= 1
+                                } label: {
+                                    LabeledContent("Roll Slash", value: "1.4")
+                                        .padding(.horizontal, 32)
+                                        .frame(minHeight: 56)
+                                        .contentShape(Rectangle())
+                                }
+                                .accessibilityElement(children: .combine)
+                                .buttonStyle(.plain)
+
+                                Divider()
+                                    .padding(.horizontal, 32)
+
+                                Link("Built with 💜 by Miickiie", destination: URL(string: "https://www.instagram.com/miiickiie")!)
+                                    .padding(.horizontal, 32)
+                                    .frame(minHeight: 56)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .background(
+                                Color(uiColor: .secondarySystemGroupedBackground),
+                                in: RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                            .zIndex(1)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .padding(.vertical, 8)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
                 }
             }
             .navigationTitle("Settings")
@@ -120,6 +166,43 @@ struct SettingsView: View {
         case .restricted: String(localized: "Restricted")
         case .limited: String(localized: "Selected photos")
         case .full: String(localized: "Full access")
+        }
+    }
+}
+
+private struct AboutMascotPeek: View {
+    let actionID: Int
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isVisible = false
+    @State private var hideTask: Task<Void, Never>?
+
+    var body: some View {
+        RollSlashMascotFace()
+            .offset(y: isVisible ? 0 : 60)
+            .frame(width: 56, height: 56)
+            .accessibilityHidden(true)
+            .allowsHitTesting(false)
+            .onChange(of: actionID) { _, _ in
+                reveal()
+            }
+            .onDisappear {
+                hideTask?.cancel()
+                isVisible = false
+            }
+    }
+
+    private func reveal() {
+        hideTask?.cancel()
+        withAnimation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.78)) {
+            isVisible = true
+        }
+        hideTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.82)) {
+                isVisible = false
+            }
         }
     }
 }

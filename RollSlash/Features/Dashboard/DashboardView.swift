@@ -237,7 +237,7 @@ private struct DashboardHeader: View {
     }
 }
 
-private struct RollSlashMascot: View {
+struct RollSlashMascot: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let actionID: Int
     @State private var isBobbing = false
@@ -306,6 +306,25 @@ private struct RollSlashMascot: View {
                 pose = .rest
             }
         }
+    }
+}
+
+struct RollSlashMascotFace: View {
+    var body: some View {
+        ZStack {
+            CatHeadSilhouette().fill(MascotPalette.fur)
+            CatInnerEarShape(leading: true).fill(MascotPalette.ear)
+            CatInnerEarShape(leading: false).fill(MascotPalette.ear)
+            HStack(spacing: 9) {
+                CatEye(squinting: true, wide: false)
+                    .rotationEffect(.degrees(14))
+                CatEye(squinting: true, wide: false)
+                    .rotationEffect(.degrees(-14))
+            }
+            .offset(y: 1)
+        }
+        .frame(width: 48, height: 50)
+        .accessibilityHidden(true)
     }
 }
 
