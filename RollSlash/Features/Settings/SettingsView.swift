@@ -6,7 +6,6 @@ struct SettingsView: View {
     @State private var confirmingReset = false
     @State private var showingResetSuccess = false
     @State private var mascotPeekID = 0
-    @State private var settingsDragStarted = false
 
     var body: some View {
         NavigationStack {
@@ -115,17 +114,11 @@ struct SettingsView: View {
                         }
                 }
             }
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 8)
-                    .onChanged { _ in
-                        guard !settingsDragStarted else { return }
-                        settingsDragStarted = true
-                        triggerMascotPeek()
-                    }
-                    .onEnded { _ in
-                        settingsDragStarted = false
-                    }
-            )
+            .onScrollPhaseChange { oldPhase, newPhase in
+                if oldPhase != .interacting && newPhase == .interacting {
+                    triggerMascotPeek()
+                }
+            }
             .navigationTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
