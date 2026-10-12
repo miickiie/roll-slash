@@ -6,6 +6,7 @@ struct SettingsView: View {
     @State private var confirmingReset = false
     @State private var showingResetSuccess = false
     @State private var mascotPeekID = 0
+    @State private var isAboutHeaderVisible = false
 
     var body: some View {
         NavigationStack {
@@ -112,10 +113,16 @@ struct SettingsView: View {
                                 .offset(y: 10)
                                 .padding(.trailing, 8)
                         }
+                        .onScrollVisibilityChange(threshold: 0.1) { isVisible in
+                            isAboutHeaderVisible = isVisible
+                            if isVisible {
+                                triggerMascotPeek()
+                            }
+                        }
                 }
             }
             .onScrollPhaseChange { oldPhase, newPhase in
-                if oldPhase != .interacting && newPhase == .interacting {
+                if oldPhase != .interacting && newPhase == .interacting && isAboutHeaderVisible {
                     triggerMascotPeek()
                 }
             }
