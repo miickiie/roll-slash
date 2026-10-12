@@ -191,7 +191,7 @@ private struct AboutMascotPeek: View {
             isVisible = true
         }
         hideTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
             guard !Task.isCancelled else { return }
             withAnimation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.82)) {
                 isVisible = false
