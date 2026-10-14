@@ -134,6 +134,126 @@ struct ViewerPreviewTests {
 }
 
 @MainActor
+@Suite("Video resource export")
+struct VideoResourceExportTests {
+    @Test("video exports retain all received chunks")
+    func writesChunks() async throws {
+        let request = PendingResourceRequest()
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let task = Task { try await PreviewResourceDelivery.write(to: destination, start: request.start, cancel: request.cancel) }
+        for _ in 0..<100 where request.completed == nil { await Task.yield() }
+        let completed = try #require(request.completed)
+        request.dataReceived?(Data([1, 2]))
+        request.dataReceived?(Data([3, 4]))
+        completed(nil)
+        try await task.value
+        #expect(try Data(contentsOf: destination) == Data([1, 2, 3, 4]))
+    }
+
+    @Test("cancelling an export stops Photos, removes the file and rejects late data")
+    func cancellationStopsTransfer() async throws {
+        let request = PendingResourceRequest()
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let task = Task { try await PreviewResourceDelivery.write(to: destination, start: request.start, cancel: request.cancel) }
+        for _ in 0..<100 where request.completed == nil { await Task.yield() }
+        _ = try #require(request.completed)
+        request.dataReceived?(Data([1, 2]))
+        task.cancel()
+        do {
+            try await task.value
+            Issue.record("A cancelled video export must throw CancellationError")
+        } catch is CancellationError {}
+        for _ in 0..<100 where !request.cancelled { await Task.yield() }
+        #expect(request.cancelled)
+        request.dataReceived?(Data([3, 4]))
+        request.completed?(nil)
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+    }
+
+    @Test("Photos export errors remove partial video files")
+    func failedTransferRemovesFile() async throws {
+        let request = PendingResourceRequest()
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let task = Task { try await PreviewResourceDelivery.write(to: destination, start: request.start, cancel: request.cancel) }
+        for _ in 0..<100 where request.completed == nil { await Task.yield() }
+        let completed = try #require(request.completed)
+        request.dataReceived?(Data([1, 2]))
+        completed(URLError(.networkConnectionLost))
+        do {
+            try await task.value
+            Issue.record("A failed transfer must return the Photos error")
+        } catch let error as URLError {
+            #expect(error.code == .networkConnectionLost)
+        }
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+    }
+
+    @Test("an already cancelled export never starts a Photos request")
+    func cancellationBeforeStarting() async throws {
+        let request = PendingResourceRequest()
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let task = Task { try await PreviewResourceDelivery.write(to: destination, start: request.start, cancel: request.cancel) }
+        task.cancel()
+        do {
+            try await task.value
+            Issue.record("An already cancelled export must throw CancellationError")
+        } catch is CancellationError {}
+        #expect(request.completed == nil)
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+    }
+}
+
+@MainActor
+@Suite("Video preview failure recovery", .serialized)
+struct VideoPreviewPlaybackTests {
+    @Test("player-item failures discovered after loading show the retry state")
+    func asynchronouslyFailedItem() async throws {
+        let playback = VideoPreviewPlayback()
+        let missingVideo = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
+        playback.load(AVPlayerItem(url: missingVideo), isMuted: true)
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !playback.hasFailed, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(playback.hasFailed)
+        #expect(playback.player == nil)
+        playback.reset()
+        #expect(!playback.hasFailed)
+    }
+
+    @Test("dismissal detaches playback observers and ignores stale failures")
+    func staleFailureAfterDismissal() async throws {
+        let playback = VideoPreviewPlayback()
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        playback.load(item, isMuted: true)
+        playback.reset()
+        NotificationCenter.default.post(name: AVPlayerItem.failedToPlayToEndTimeNotification, object: item)
+        for _ in 0..<20 { await Task.yield() }
+        #expect(!playback.hasFailed)
+        #expect(playback.player == nil)
+        playback.load(nil, isMuted: true)
+        #expect(playback.hasFailed)
+    }
+}
+
+@MainActor
+private final class PendingResourceRequest {
+    var dataReceived: (@Sendable (Data) -> Void)?
+    var completed: (@Sendable ((any Error)?) -> Void)?
+    var cancelled = false
+
+    func start(_ dataReceived: @escaping @Sendable (Data) -> Void,
+               _ completed: @escaping @Sendable ((any Error)?) -> Void) -> PHAssetResourceDataRequestID {
+        self.dataReceived = dataReceived
+        self.completed = completed
+        return 42
+    }
+
+    func cancel(_ id: PHAssetResourceDataRequestID) { cancelled = id == 42 }
+}
+
+@MainActor
 private final class PendingPreviewRequest {
     var handler: (@Sendable (UIImage?, [AnyHashable: Any]?) -> Void)?
     var cancelled = false
@@ -497,6 +617,9 @@ private struct PreviewLifecycleHost: View {
     func authorizationStatus() -> PhotoPermission { .full }
     func requestAuthorization() async -> PhotoPermission { .full }
     func fetchAssets() async throws -> [PhotoAssetDescriptor] { assets }
+    func existingAssetIdentifiers(in identifiers: Set<String>) async throws -> Set<String> {
+        identifiers.intersection(assets.map(\.id))
+    }
     func deleteAssets(with identifiers: [String]) async throws -> Set<String> { [] }
     func isFavorite(with identifier: String) async -> Bool { false }
     func setFavorite(_ favorite: Bool, for identifier: String) async throws {}

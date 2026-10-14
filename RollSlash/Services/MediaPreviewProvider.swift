@@ -1,4 +1,5 @@
 import AVFoundation
+import Foundation
 import Photos
 import PhotosUI
 import UIKit
@@ -95,6 +96,62 @@ enum PreviewImageDelivery {
         }
         for await value in stream { return Task.isCancelled ? nil : value }
         return nil
+    }
+}
+
+@MainActor
+enum PreviewResourceDelivery {
+    static func write(
+        to destination: URL,
+        start: (@escaping @Sendable (Data) -> Void, @escaping @Sendable ((any Error)?) -> Void) -> PHAssetResourceDataRequestID,
+        cancel: @escaping @MainActor @Sendable (PHAssetResourceDataRequestID) -> Void
+    ) async throws {
+        try Task.checkCancellation()
+        do {
+            let file = try PreviewResourceFile(destination: destination)
+            defer { file.close() }
+            let stream = AsyncThrowingStream<Void, any Error> { continuation in
+                let requestID = start({ data in
+                    do { try file.write(data) }
+                    catch { continuation.finish(throwing: error) }
+                }, { error in
+                    if let error { continuation.finish(throwing: error) }
+                    else { continuation.finish() }
+                })
+                continuation.onTermination = { @Sendable _ in
+                    file.close()
+                    Task { @MainActor in cancel(requestID) }
+                }
+            }
+            for try await _ in stream {}
+            try Task.checkCancellation()
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+    }
+}
+
+/// PhotoKit callbacks may arrive after cancellation. The lock keeps late writes
+/// from touching a closed file and avoids buffering an entire video in memory.
+private final class PreviewResourceFile: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handle: FileHandle?
+
+    init(destination: URL) throws {
+        try Data().write(to: destination, options: .withoutOverwriting)
+        handle = try FileHandle(forWritingTo: destination)
+    }
+
+    func write(_ data: Data) throws {
+        try lock.withLock { try handle?.write(contentsOf: data) }
+    }
+
+    func close() {
+        lock.withLock {
+            try? handle?.close()
+            handle = nil
+        }
     }
 }
 
@@ -274,25 +331,14 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
             .appendingPathExtension(fileExtension.isEmpty ? "mov" : fileExtension)
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
-        do {
-            try Task.checkCancellation()
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                PHAssetResourceManager.default().writeData(
-                    for: resource, toFile: destination, options: options
-                ) { error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                    } else {
-                        continuation.resume()
-                    }
-                }
-            }
-            try Task.checkCancellation()
-            return destination
-        } catch {
-            try? FileManager.default.removeItem(at: destination)
-            throw error
+        let resourceManager = PHAssetResourceManager.default()
+        try await PreviewResourceDelivery.write(to: destination) { dataReceived, completed in
+            resourceManager.requestData(for: resource, options: options,
+                                        dataReceivedHandler: dataReceived, completionHandler: completed)
+        } cancel: { requestID in
+            resourceManager.cancelDataRequest(requestID)
         }
+        return destination
     }
 
     func startCaching(identifiers: [String], targetSize: CGSize, kind: PreviewRequestKind) {

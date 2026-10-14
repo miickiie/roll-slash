@@ -59,6 +59,53 @@ struct RepositoryTests {
         #expect(try repository.decision(for: "a") == nil)
     }
 
+    @Test("failed review undo rolls back status, cursor, selections and action edits")
+    func reviewUndoSaveFailureRollsBack() throws {
+        var failSave = false
+        let repository = SwiftDataCleanupRepository(container: try makeContainer()) { context in
+            if failSave { throw CocoaError(.fileWriteOutOfSpace) }
+            try context.save()
+        }
+        let session = try repository.createSession(groupKind: .month, selectedGroupKeys: ["month:2026-01"],
+                                                   orderedAssetIDs: ["a", "b"], workPlan: nil)
+        _ = try repository.recordDecisions(session: session, decisions: [("a", .deletePending), ("b", .deletePending)])
+        session.status = .reviewing
+        try repository.updateReviewSelection(session: session, candidateIDs: ["a", "b"], selectedIDs: ["b"])
+        failSave = true
+        #expect(throws: CocoaError.self) { try repository.undoLastUnitFromReview(session: session) }
+        #expect(session.status == .reviewing)
+        #expect(session.cursor == 2)
+        #expect(session.reviewSelectedIDs == ["b"])
+        #expect(session.draftDeleteIDs.isEmpty)
+        let actions = try repository.actions(for: session.identifier)
+        #expect(actions.allSatisfy { $0.isApplied && $0.decision == .deletePending })
+        #expect(try repository.decision(for: "a") == .keep)
+        #expect(try repository.decision(for: "b") == .deletePending)
+        failSave = false
+        try repository.undoLastUnitFromReview(session: session)
+        #expect(session.status == .swiping)
+        #expect(session.cursor == 1)
+        #expect(try repository.actions(for: session.identifier).first?.decision == .keep)
+    }
+
+    @Test("review undo restores a comparison draft using the final review choices")
+    func reviewUndoPreservesComparisonChoices() throws {
+        let repository = SwiftDataCleanupRepository(container: try makeContainer())
+        let plan = CleanupWorkPlan(units: [CleanupWorkUnit(kind: .comparison, assetIDs: ["a", "b"],
+                                                          contextAssetIDs: [], clusterID: "a")])
+        let session = try repository.createSession(groupKind: .type, selectedGroupKeys: ["type:similarPhotos"],
+                                                   orderedAssetIDs: ["a", "b"], workPlan: plan)
+        _ = try repository.recordDecisions(session: session, decisions: [("a", .deletePending), ("b", .deletePending)])
+        session.status = .reviewing
+        try repository.updateReviewSelection(session: session, candidateIDs: ["a", "b"], selectedIDs: ["b"])
+        try repository.undoLastUnitFromReview(session: session)
+        #expect(session.cursor == 0)
+        #expect(session.draftDeleteIDs == ["b"])
+        try repository.setUnitApplied(session: session, range: 0..<2, applied: true)
+        #expect(try repository.decision(for: "a") == .keep)
+        #expect(try repository.decision(for: "b") == .deletePending)
+    }
+
     @Test("single review selection update changes only the tapped candidate")
     func singleReviewSelectionUpdate() throws {
         let repository = SwiftDataCleanupRepository(container: try makeContainer())

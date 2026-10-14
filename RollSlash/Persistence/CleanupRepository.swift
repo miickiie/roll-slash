@@ -22,6 +22,7 @@ protocol CleanupRepository: AnyObject {
     func recordDecision(session: CleanupSessionRecord, assetIdentifier: String, decision: AssetDecision) throws -> CleanupActionRecord
     func recordDecisions(session: CleanupSessionRecord, decisions: [(String, AssetDecision)]) throws -> [CleanupActionRecord]
     func setUnitApplied(session: CleanupSessionRecord, range: Range<Int>, applied: Bool) throws
+    func undoLastUnitFromReview(session: CleanupSessionRecord) throws
     func replaceActions(sessionIdentifier: UUID, actions: [CleanupActionSnapshot]) throws
     func updateReviewSelection(session: CleanupSessionRecord, candidateIDs: [String], selectedIDs: Set<String>) throws
     func updateReviewSelection(session: CleanupSessionRecord, assetIdentifier: String, isSelected: Bool) throws
@@ -44,12 +45,14 @@ final class SwiftDataCleanupRepository: CleanupRepository {
     private let analysisContext: ModelContext
     private var analysisIndex: [String: MediaAnalysisCacheRecord]?
     private let analysisEncoder = JSONEncoder()
+    private let saveChanges: (ModelContext) throws -> Void
 
-    init(container: ModelContainer) {
+    init(container: ModelContainer, saveChanges: @escaping (ModelContext) throws -> Void = { try $0.save() }) {
         context = ModelContext(container)
         context.autosaveEnabled = true
         analysisContext = ModelContext(container)
         analysisContext.autosaveEnabled = false
+        self.saveChanges = saveChanges
     }
 
     func allDecisions() throws -> [String: AssetDecision] {
@@ -182,7 +185,27 @@ final class SwiftDataCleanupRepository: CleanupRepository {
                 drafts.formUnion(unitActions.filter { $0.decision == .deletePending }.map(\.assetIdentifier))
             }
             session.draftDeleteIDs = drafts
-            try context.save()
+            try save()
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
+
+    func undoLastUnitFromReview(session: CleanupSessionRecord) throws {
+        guard session.status == .reviewing, session.cursor > 0,
+              let previous = session.unit(at: session.cursor - 1) else { return }
+        do {
+            let selected = Set(session.reviewSelectedIDs)
+            for action in try actions(for: session.identifier) where action.isApplied && action.decision == .deletePending {
+                action.decision = selected.contains(action.assetIdentifier) ? .deletePending : .keep
+                try upsertDecision(action.decision, for: action.assetIdentifier, sessionIdentifier: session.identifier)
+            }
+            session.status = .swiping
+            session.reviewSelectedIDs = []
+            try setUnitApplied(session: session,
+                               range: previous.start..<(previous.start + previous.unit.assetIDs.count),
+                               applied: false)
         } catch {
             context.rollback()
             throw error
@@ -298,7 +321,7 @@ final class SwiftDataCleanupRepository: CleanupRepository {
     }
 
     func save() throws {
-        try context.save()
+        try saveChanges(context)
     }
 
     func discard(session: CleanupSessionRecord) throws {

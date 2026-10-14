@@ -89,6 +89,69 @@ final class RollSlashUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Freshly slashed"].waitForExistence(timeout: 3))
     }
 
+    func testReviewUndoPreservesAnEarlierKeepChoice() {
+        let app = XCUIApplication()
+        app.launchArguments.append("--ui-testing")
+        app.launch()
+        for month in ["2026-08", "2026-07"] {
+            let group = app.buttons["group-row-month:\(month)"]
+            XCTAssertTrue(group.waitForExistence(timeout: 5))
+            group.tap()
+        }
+        app.buttons["clean-selected"].tap()
+        for _ in 0..<2 {
+            let delete = app.buttons["decision-delete"]
+            XCTAssertTrue(delete.waitForExistence(timeout: 3))
+            XCTAssertTrue(waitUntilEnabled(delete))
+            delete.tap()
+        }
+        XCTAssertTrue(app.navigationBars["Final review"].waitForExistence(timeout: 3))
+        let earlierChoice = app.buttons["review-selection-demo-1"]
+        earlierChoice.tap()
+        XCTAssertTrue(waitForValue(earlierChoice, "Not selected"))
+        app.buttons["Undo Last"].tap()
+        let keep = app.buttons["decision-keep"]
+        XCTAssertTrue(keep.waitForExistence(timeout: 3))
+        XCTAssertTrue(waitUntilEnabled(keep))
+        keep.tap()
+        XCTAssertTrue(app.buttons["Back to library"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["commit-deletion"].exists)
+    }
+
+    func testFinalReviewNavigationResetsZoomAndPan() {
+        let app = XCUIApplication()
+        app.launchArguments.append("--ui-testing")
+        app.launch()
+        for month in ["2026-08", "2026-07"] {
+            let group = app.buttons["group-row-month:\(month)"]
+            XCTAssertTrue(group.waitForExistence(timeout: 5))
+            group.tap()
+        }
+        app.buttons["clean-selected"].tap()
+        for _ in 0..<2 {
+            let delete = app.buttons["decision-delete"]
+            XCTAssertTrue(delete.waitForExistence(timeout: 3))
+            XCTAssertTrue(waitUntilEnabled(delete))
+            delete.tap()
+        }
+        let preview = app.buttons["review-preview-demo-1"]
+        XCTAssertTrue(preview.waitForExistence(timeout: 3))
+        preview.tap()
+        let close = app.buttons["close-media-viewer"]
+        XCTAssertTrue(close.waitForExistence(timeout: 3))
+        app.buttons["review-viewer-next"].tap()
+        XCTAssertEqual(app.staticTexts["review-viewer-position"].label, "2 of 2")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).doubleTap()
+        app.swipeUp()
+        XCTAssertTrue(close.exists)
+        app.buttons["review-viewer-previous"].tap()
+        XCTAssertEqual(app.staticTexts["review-viewer-position"].label, "1 of 2")
+        app.swipeDown()
+        let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: close)
+        XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 3), .completed)
+        XCTAssertTrue(app.staticTexts["2 selected for deletion"].exists)
+    }
+
     func testFinalReviewPreviewVerticalSwipesDismissAndPreserveChoices() {
         let app = XCUIApplication()
         app.launchArguments.append("--ui-testing")

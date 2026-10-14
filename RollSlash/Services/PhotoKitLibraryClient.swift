@@ -101,6 +101,29 @@ final class PhotoKitLibraryClient: NSObject, PhotoLibraryClient {
         return fetched.assets
     }
 
+    func existingAssetIdentifiers(in identifiers: Set<String>) async throws -> Set<String> {
+        guard authorizationStatus() == .full else { throw PhotoLibraryVerificationError.fullAccessRequired }
+        let existing = try await Task.detached(priority: .utility) { () throws -> Set<String> in
+            let options = PHFetchOptions()
+            options.includeHiddenAssets = true
+            options.includeAllBurstAssets = true
+            options.includeAssetSourceTypes = [.typeUserLibrary, .typeCloudShared, .typeiTunesSynced]
+            let ids = Array(identifiers)
+            var existing = Set<String>()
+            for start in stride(from: 0, to: ids.count, by: 200) {
+                guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized else {
+                    throw PhotoLibraryVerificationError.fullAccessRequired
+                }
+                let result = PHAsset.fetchAssets(withLocalIdentifiers: Array(ids[start..<min(start + 200, ids.count)]),
+                                                 options: options)
+                result.enumerateObjects { asset, _, _ in existing.insert(asset.localIdentifier) }
+            }
+            return existing
+        }.value
+        guard authorizationStatus() == .full else { throw PhotoLibraryVerificationError.fullAccessRequired }
+        return existing
+    }
+
     func estimateStorageBytes(for identifiers: [String]) async -> [String: Int64] {
         let identifiers = identifiers
         return await Task.detached(priority: .utility) {

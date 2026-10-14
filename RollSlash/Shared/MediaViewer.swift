@@ -1,4 +1,5 @@
 import AVKit
+import Observation
 import Photos
 import PhotosUI
 import SwiftUI
@@ -25,7 +26,7 @@ struct MediaViewer: View {
     @State private var image: UIImage?
     @State private var hasDetailedImage = false
     @State private var livePhoto: PHLivePhoto?
-    @State private var player: AVPlayer?
+    @State private var playback = VideoPreviewPlayback()
     @State private var isLivePlaying = false
     @State private var isMuted = true
     @State private var failed = false
@@ -49,6 +50,8 @@ struct MediaViewer: View {
         let modificationDate: Date?
         let retryCount: Int
     }
+
+    private var player: AVPlayer? { playback.player }
 
     var body: some View {
         ZStack {
@@ -87,7 +90,7 @@ struct MediaViewer: View {
             favoriteTask = nil
             shareTask?.cancel()
             shareTask = nil
-            player?.pause()
+            playback.reset()
         }
         .onChange(of: asset.id) { _, _ in
             favoriteTask?.cancel()
@@ -161,7 +164,7 @@ struct MediaViewer: View {
                 VideoPlayer(player: player)
                     .accessibilityLabel("Video preview")
                     .onAppear { player.play() }
-            } else if failed {
+            } else if failed || playback.hasFailed {
                 unavailablePreview
             } else {
                 loading
@@ -278,8 +281,7 @@ struct MediaViewer: View {
         let generation = UUID()
         loadGeneration = generation
         let identifier = asset.id
-        player?.pause()
-        player = nil
+        playback.reset()
         image = initialImage
         hasDetailedImage = false
         livePhoto = nil
@@ -308,12 +310,7 @@ struct MediaViewer: View {
         case .video:
             let item = await appModel.previewProvider.playerItem(for: identifier)
             guard isCurrent(generation) else { return }
-            if let item {
-                let newPlayer = AVPlayer(playerItem: item)
-                newPlayer.isMuted = isMuted
-                player = newPlayer
-                newPlayer.play()
-            }
+            playback.load(item, isMuted: isMuted)
             failed = player == nil
             let detailedImage = await appModel.previewProvider.image(for: identifier, targetSize: target, kind: .active)
             guard isCurrent(generation) else { return }
@@ -453,6 +450,67 @@ private final class VideoActivityItemSource: NSObject, UIActivityItemSource {
         dataTypeIdentifierForActivityType activityType: UIActivity.ActivityType?
     ) -> String {
         UTType(filenameExtension: url.pathExtension)?.identifier ?? UTType.movie.identifier
+    }
+}
+
+@MainActor
+@Observable
+final class VideoPreviewPlayback {
+    private(set) var player: AVPlayer?
+    private(set) var hasFailed = false
+    @ObservationIgnored private var observation: VideoFailureObservation?
+    @ObservationIgnored private var generation = UUID()
+
+    func load(_ item: AVPlayerItem?, isMuted: Bool) {
+        reset()
+        guard let item else { hasFailed = true; return }
+        let player = AVPlayer(playerItem: item)
+        player.isMuted = isMuted
+        self.player = player
+        let generation = self.generation
+        observation = VideoFailureObservation(item: item) { [weak self] in
+            Task { @MainActor in self?.recordFailure(generation: generation) }
+        }
+        if item.status == .failed {
+            recordFailure(generation: generation)
+        } else {
+            player.play()
+        }
+    }
+
+    func reset() {
+        generation = UUID()
+        observation = nil
+        player?.pause()
+        player = nil
+        hasFailed = false
+    }
+
+    private func recordFailure(generation: UUID) {
+        guard generation == self.generation, player != nil else { return }
+        observation = nil
+        player?.pause()
+        player = nil
+        hasFailed = true
+    }
+}
+
+private final class VideoFailureObservation {
+    private let status: NSKeyValueObservation
+    private let failedToPlay: NSObjectProtocol
+
+    init(item: AVPlayerItem, onFailure: @escaping @Sendable () -> Void) {
+        status = item.observe(\.status, options: [.initial, .new]) { item, _ in
+            if item.status == .failed { onFailure() }
+        }
+        failedToPlay = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.failedToPlayToEndTimeNotification, object: item, queue: nil
+        ) { _ in onFailure() }
+    }
+
+    deinit {
+        status.invalidate()
+        NotificationCenter.default.removeObserver(failedToPlay)
     }
 }
 

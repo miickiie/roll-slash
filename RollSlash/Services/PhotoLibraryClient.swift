@@ -24,6 +24,14 @@ enum PhotoLibraryFavoriteError: LocalizedError, Sendable {
     }
 }
 
+enum PhotoLibraryVerificationError: LocalizedError, Sendable {
+    case fullAccessRequired
+
+    var errorDescription: String? {
+        String(localized: "Full Photo Access is required to verify whether selected items still exist in Photos.")
+    }
+}
+
 @MainActor
 protocol PhotoLibraryClient: AnyObject {
     var onLibraryChange: (@MainActor @Sendable () -> Void)? { get set }
@@ -31,6 +39,8 @@ protocol PhotoLibraryClient: AnyObject {
     func requestAuthorization() async -> PhotoPermission
     func startObservingChanges()
     func fetchAssets() async throws -> [PhotoAssetDescriptor]
+    /// Checks existence independently of the visible dashboard library. Requires full access.
+    func existingAssetIdentifiers(in identifiers: Set<String>) async throws -> Set<String>
     func estimateStorageBytes(for identifiers: [String]) async -> [String: Int64]
     func deleteAssets(with identifiers: [String]) async throws -> Set<String>
     func isFavorite(with identifier: String) async -> Bool

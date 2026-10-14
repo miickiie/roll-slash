@@ -127,6 +127,117 @@ struct AppModelTests {
         #expect(harness.model.route == .completion)
     }
 
+    @Test("review undo preserves earlier items explicitly kept in final review")
+    func reviewUndoPreservesKeeps() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+        await harness.model.decide(.deletePending)
+        await harness.model.decide(.deletePending)
+        harness.model.toggleReviewSelection("jan-new")
+
+        harness.model.undoLastSwipeFromReview()
+
+        #expect(harness.model.route == .cleanup)
+        #expect(harness.model.decisionsByAssetID["jan-new"] == .keep)
+        #expect(harness.model.keptCount == 1)
+        await harness.model.decide(.keep)
+        #expect(harness.model.route == .completion)
+        #expect(harness.client.deletionCallCount == 0)
+    }
+
+    @Test("review undo and redo retain the edited deletion selection")
+    func reviewUndoRedoPreservesSelection() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+        await harness.model.decide(.deletePending)
+        await harness.model.decide(.deletePending)
+        harness.model.toggleReviewSelection("jan-new")
+        harness.model.undoLastSwipeFromReview()
+        await harness.model.redo()
+        #expect(harness.model.reviewSelectedIDs == ["jan-old"])
+        await harness.model.commitDeletion()
+        #expect(harness.client.deletedIdentifiers == ["jan-old"])
+        #expect(harness.client.assets.contains { $0.id == "jan-new" })
+    }
+
+    @Test("hidden photos cannot be counted as recovered deletions")
+    func deletionRecoveryPreservesHiddenPhotos() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let february = try #require(harness.model.monthGroups.first { $0.key.value == "2026-02" })
+        harness.model.toggleSelection(february)
+        harness.model.beginSelectedCleanup()
+        await harness.model.decide(.deletePending)
+        let session = try #require(harness.model.activeSession)
+        session.status = .deleting
+        let originalAssets = harness.client.assets
+        harness.client.hiddenAssetIDs = ["feb"]
+        harness.client.assets.removeAll { $0.id == "feb" }
+
+        await harness.model.refreshAuthorization()
+
+        #expect(harness.model.activeSession?.identifier == session.identifier)
+        #expect(session.status == .deleting)
+        #expect(harness.model.reviewSelectedIDs == ["feb"])
+        #expect(harness.model.lifetimeCleanupSummary == .zero)
+        #expect(harness.model.route == .dashboard)
+        #expect(harness.client.deletionCallCount == 0)
+
+        harness.client.hiddenAssetIDs = []
+        harness.client.assets = originalAssets
+        await harness.model.refreshAuthorization()
+        #expect(session.status == .reviewing)
+        #expect(harness.model.canEditReview)
+        await harness.model.commitDeletion()
+        #expect(harness.model.lifetimeCleanupSummary.itemCount == 1)
+    }
+
+    @Test("failed existence verification leaves a submitted deletion untouched")
+    func deletionRecoveryVerificationFailure() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let february = try #require(harness.model.monthGroups.first { $0.key.value == "2026-02" })
+        harness.model.toggleSelection(february)
+        harness.model.beginSelectedCleanup()
+        await harness.model.decide(.deletePending)
+        let session = try #require(harness.model.activeSession)
+        session.status = .deleting
+        harness.client.shouldFailVerification = true
+        harness.client.assets.removeAll { $0.id == "feb" }
+        await harness.model.refreshAuthorization()
+        #expect(session.status == .deleting)
+        #expect(harness.model.activeSession != nil)
+        #expect(harness.model.reviewSelectedIDs == ["feb"])
+        #expect(harness.model.lifetimeCleanupSummary == .zero)
+        #expect(harness.model.libraryLoadError != nil)
+    }
+
+    @Test("full access preserves decisions for photos hidden from the dashboard")
+    func hiddenPhotosPreserveDecisions() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let originalAssets = harness.client.assets
+        let january = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        harness.model.toggleSelection(january)
+        harness.model.beginSelectedCleanup()
+        await harness.model.decide(.keep)
+        harness.client.hiddenAssetIDs = ["jan-new"]
+        harness.client.assets.removeAll { $0.id == "jan-new" }
+        await harness.model.reloadLibrary()
+        #expect(harness.model.decisionsByAssetID["jan-new"] == .keep)
+        harness.client.hiddenAssetIDs = []
+        harness.client.assets = originalAssets
+        await harness.model.reloadLibrary()
+        let restoredJanuary = try #require(harness.model.monthGroups.first { $0.key.value == "2026-01" })
+        #expect(restoredJanuary.unresolvedCount == 1)
+    }
+
     @Test("review selection supports keep all and select all")
     func reviewSelection() async throws {
         let harness = try makeHarness()
@@ -732,6 +843,8 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
     var permission: PhotoPermission = .full
     var suspendFetches = false
     var shouldFailFetch = false
+    var hiddenAssetIDs = Set<String>()
+    var shouldFailVerification = false
     var favoriteLookupCount = 0
     var suspendEstimates = false
     var suspendDeletions = false
@@ -766,6 +879,12 @@ private final class TestPhotoLibraryClient: PhotoLibraryClient {
     func waitForPendingFetches(_ count: Int) async {
         if pendingFetches.count >= count { return }
         await withCheckedContinuation { pendingCountWaiters.append((count, $0)) }
+    }
+
+    func existingAssetIdentifiers(in identifiers: Set<String>) async throws -> Set<String> {
+        guard permission == .full else { throw PhotoLibraryVerificationError.fullAccessRequired }
+        if shouldFailVerification { throw URLError(.cannotLoadFromNetwork) }
+        return identifiers.intersection(Set(assets.map(\.id)).union(hiddenAssetIDs))
     }
     func finishFetch(at index: Int, returning assets: [PhotoAssetDescriptor]) {
         pendingFetches.remove(at: index).resume(returning: assets)

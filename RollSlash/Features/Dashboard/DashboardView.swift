@@ -700,14 +700,24 @@ private struct ResumeBanner: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(appModel.activeSession?.status == .deleting ? "Deletion needs verification" : "Cleanup in progress")
                     .font(.headline)
-                Text(appModel.activeSession?.status == .deleting ? "Full Photo Access is required to reconcile the result." : "\(appModel.sessionRemaining) items remaining")
+                Text(appModel.activeSession?.status == .deleting
+                     ? (appModel.permission == .full
+                        ? "Make hidden selected items visible in Photos, then check again."
+                        : "Full Photo Access is required to reconcile the result.")
+                     : "\(appModel.sessionRemaining) items remaining")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer()
             if appModel.activeSession?.status == .deleting {
-                Button("Manage Access") { appModel.openSystemSettings() }
-                    .buttonStyle(.borderedProminent)
+                if appModel.permission == .full {
+                    Button("Check Again") { Task { await appModel.reloadLibrary() } }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(appModel.isLoading)
+                } else {
+                    Button("Manage Access") { appModel.openSystemSettings() }
+                        .buttonStyle(.borderedProminent)
+                }
             } else {
                 Button("Discard", role: .destructive) { showingDiscardConfirmation = true }
                     .fullScreenCover(isPresented: $showingDiscardConfirmation) {

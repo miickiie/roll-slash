@@ -585,6 +585,9 @@ struct TypeGroupingTests {
         fetchCount += 1
         return assets
     }
+    func existingAssetIdentifiers(in identifiers: Set<String>) async throws -> Set<String> {
+        identifiers.intersection(assets.map(\.id))
+    }
     func deleteAssets(with identifiers: [String]) async throws -> Set<String> {
         if failDeletion { throw URLError(.cancelled) }
         deleted = Set(identifiers)

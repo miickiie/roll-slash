@@ -570,9 +570,11 @@ final class AppModel {
             assetIndex = Dictionary(uniqueKeysWithValues: fetchedAssets.map { ($0.id, $0) })
             previewProvider.invalidateCachedImages()
             try refreshDecisionCache()
-            try await recoverDeletingSessionIfPossible()
+            try await recoverDeletingSessionIfPossible(expectedReloadGeneration: generation)
             guard generation == libraryReloadGeneration, permission.canRead else { return }
-            try reconcileSessionState(purgeMissingDecisions: permission == .full)
+            try await reconcileSessionState(purgeMissingDecisions: permission == .full,
+                                            expectedReloadGeneration: generation)
+            guard generation == libraryReloadGeneration, permission.canRead else { return }
             try refreshDecisionCache()
             try loadCachedLocations()
             let cachedResults = try repository.cachedAnalysis(for: assets, purgeMissing: permission == .full)
@@ -660,7 +662,9 @@ final class AppModel {
             try? repository.save()
             route = .review
         case .deleting:
-            errorMessage = String(localized: "Roll Slash must verify the previous deletion before it can continue. Grant Full Photo Access, then return to the app.")
+            errorMessage = permission == .full
+                ? String(localized: "Roll Slash must verify the previous deletion before it can continue. Make any hidden selected items visible in Photos, then check again.")
+                : String(localized: "Roll Slash must verify the previous deletion before it can continue. Grant Full Photo Access, then return to the app.")
             route = .dashboard
         }
         preheatAroundCurrentAsset()
@@ -807,14 +811,11 @@ final class AppModel {
     func undoLastSwipeFromReview() {
         guard canEditReview, let session = activeSession, session.cursor > 0 else { return }
         do {
-            let applied = actions.filter(\.isApplied)
-            session.status = .swiping
-            try repository.updateReviewSelection(
-                session: session,
-                candidateIDs: applied.map(\.assetIdentifier),
-                selectedIDs: Set(applied.filter { $0.decision == .deletePending }.map(\.assetIdentifier))
-            )
-            undo()
+            try repository.undoLastUnitFromReview(session: session)
+            try refreshDecisionCache()
+            actions = try repository.actions(for: session.identifier)
+            routeCurrentWorkUnit()
+            preheatAroundCurrentAsset()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -1419,14 +1420,17 @@ final class AppModel {
         )
     }
 
-    private func reconcileSessionState(purgeMissingDecisions: Bool) throws {
+    private func reconcileSessionState(purgeMissingDecisions: Bool, expectedReloadGeneration: Int) async throws {
         // Only crash recovery may change the submitted selection of a deleting session.
         guard !isDeleting, activeSession?.status != .deleting else { return }
         let accessible = Set(assets.map(\.id))
         if purgeMissingDecisions {
-            let staleDecisions = Set(try repository.allDecisions().keys).subtracting(accessible)
-            if !staleDecisions.isEmpty {
-                try repository.removeDecisions(for: staleDecisions)
+            let absentFromDashboard = Set(try repository.allDecisions().keys).subtracting(accessible)
+            if !absentFromDashboard.isEmpty {
+                let existing = try await photoLibrary.existingAssetIdentifiers(in: absentFromDashboard)
+                guard expectedReloadGeneration == libraryReloadGeneration, permission == .full,
+                      !isDeleting, activeSession?.status != .deleting else { return }
+                try repository.removeDecisions(for: absentFromDashboard.subtracting(existing))
             }
         }
 
@@ -1480,23 +1484,28 @@ final class AppModel {
         actions = try repository.actions(for: session.identifier)
     }
 
-    private func recoverDeletingSessionIfPossible() async throws {
+    private func recoverDeletingSessionIfPossible(expectedReloadGeneration: Int) async throws {
         guard !isDeleting, permission == .full,
               let session = activeSession,
               session.status == .deleting else { return }
 
-        let accessible = Set(assets.map(\.id))
         let submitted = Set(session.reviewSelectedIDs)
+        let stillPresent = try await photoLibrary.existingAssetIdentifiers(in: submitted)
+        guard expectedReloadGeneration == libraryReloadGeneration, permission == .full,
+              !isDeleting, activeSession?.identifier == session.identifier,
+              session.status == .deleting else { return }
         let fullyReviewed = session.cursor >= session.orderedAssetIDs.count
-        let stillPresent = submitted.intersection(accessible)
-        let confirmedMissing = submitted.subtracting(accessible)
+        let confirmedMissing = submitted.subtracting(stillPresent)
         if !confirmedMissing.isEmpty {
             cleanupMetricsStore.record(sessionID: session.identifier, ids: Array(confirmedMissing), estimatedBytes: [:])
             lifetimeCleanupSummary = cleanupMetricsStore.summary()
             try repository.removeDecisions(for: confirmedMissing)
         }
 
-        if stillPresent.isEmpty {
+        if !stillPresent.isSubset(of: Set(assets.map(\.id))) {
+            route = .dashboard
+            errorMessage = String(localized: "Some selected items still exist in Photos but are hidden or outside the visible library. Make them visible in Photos, then check again to finish verifying the deletion.")
+        } else if stillPresent.isEmpty {
             try await finalizeSession(session, markGroupsCompleted: fullyReviewed)
             if fullyReviewed {
                 lastCleanupSummary = cleanupMetricsStore.summary(for: session.identifier)
