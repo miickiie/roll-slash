@@ -102,7 +102,10 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Section {
-                    LabeledContent("Roll Slash", value: "1.4")
+                    LabeledContent(
+                        "Roll Slash",
+                        value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+                    )
 
                     Link("Built with 💜 by Miickiie", destination: URL(string: "https://www.instagram.com/miiickiie")!)
                 } header: {
