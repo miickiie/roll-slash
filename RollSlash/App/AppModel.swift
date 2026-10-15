@@ -2,6 +2,26 @@ import Foundation
 import Observation
 import SwiftData
 import CryptoKit
+import OSLog
+
+private enum CleanupPerformance {
+    private static let signposter = OSSignposter(subsystem: "com.rollslash.app", category: "Cleanup")
+    private static let logger = Logger(subsystem: "com.rollslash.app", category: "Cleanup")
+
+    @MainActor
+    static func measure<Value>(_ phase: StaticString, operation: () throws -> Value) rethrows -> Value {
+        let interval = signposter.beginInterval(phase, id: signposter.makeSignpostID())
+        let started = ContinuousClock.now
+        defer {
+            signposter.endInterval(phase, interval)
+            let elapsed = started.duration(to: .now)
+            if elapsed > .milliseconds(100) {
+                logger.notice("Slow cleanup phase=\(String(describing: phase), privacy: .public) duration=\(String(describing: elapsed), privacy: .public)")
+            }
+        }
+        return try operation()
+    }
+}
 
 struct CleanupMetricsSummary: Equatable {
     let itemCount: Int
@@ -242,7 +262,19 @@ final class AppModel {
     private(set) var assetIndex: [String: PhotoAssetDescriptor] = [:]
     private(set) var decisionsByAssetID: [String: AssetDecision] = [:]
     var activeSession: CleanupSessionRecord?
-    var actions: [CleanupActionRecord] = []
+    var actions: [CleanupActionRecord] = [] {
+        didSet {
+            var kept = 0, deleted = 0
+            for action in actions where action.isApplied {
+                if action.decision == .keep { kept += 1 }
+                else if action.decision == .deletePending { deleted += 1 }
+            }
+            keptCount = kept
+            deleteCount = deleted
+        }
+    }
+    private(set) var keptCount = 0
+    private(set) var deleteCount = 0
     var isLoading = false
     private(set) var libraryLoadError: String?
     private(set) var isDeleting = false
@@ -270,7 +302,10 @@ final class AppModel {
     @ObservationIgnored private var bucketLocationLocaleIdentifier = Locale.current.identifier
     @ObservationIgnored private var locationResolutionTask: Task<Void, Never>?
     @ObservationIgnored private var libraryReloadGeneration = 0
+    @ObservationIgnored private var analysisCacheLoadTask: Task<MediaAnalysisCacheSnapshot, Error>?
     @ObservationIgnored private var groupBuildGeneration = 0
+    @ObservationIgnored private var typeGroupBuildGeneration = 0
+    @ObservationIgnored private var publishedTypeGroupGeneration = 0
     @ObservationIgnored private var localPhotoChangeDepth = 0
     @ObservationIgnored private var libraryChangeCoalesced = false
 
@@ -280,12 +315,13 @@ final class AppModel {
         locationResolver: any LocationResolver,
         modelContainer: ModelContainer,
         analysisClient: any MediaAnalysisClient = PhotoKitMediaAnalysisClient(),
+        analysisCacheReader: (any AnalysisCacheReading)? = nil,
         onboardingDefaults: UserDefaults = .standard
     ) {
         self.photoLibrary = photoLibrary
         self.previewProvider = previewProvider
         self.locationResolver = locationResolver
-        self.repository = SwiftDataCleanupRepository(container: modelContainer)
+        self.repository = SwiftDataCleanupRepository(container: modelContainer, analysisReader: analysisCacheReader)
         self.analysisClient = analysisClient
         self.onboardingDefaults = onboardingDefaults
         let cleanupMetricsStore = CleanupMetricsStore()
@@ -397,13 +433,15 @@ final class AppModel {
         guard let session = activeSession, session.status == .swiping, let unit = currentComparison else { return }
         let deletions = keepAll ? Set<String>() : comparisonDeleteIDs
         do {
-            let sequence = session.cursor
-            let recorded = try repository.recordDecisions(session: session, decisions: unit.assetIDs.map {
-                ($0, deletions.contains($0) ? .deletePending : .keep)
-            })
-            actions.removeAll { $0.sequence >= sequence }
-            actions += recorded
-            try refreshDecisionCache()
+            try CleanupPerformance.measure("Decision commit") {
+                let sequence = session.cursor
+                let recorded = try repository.recordDecisions(session: session, decisions: unit.assetIDs.map {
+                    ($0, deletions.contains($0) ? .deletePending : .keep)
+                })
+                discardRedoActions(from: sequence)
+                actions += recorded
+                try refreshDecisionCache()
+            }
             await advanceAfterDecision()
         } catch { errorMessage = error.localizedDescription }
     }
@@ -415,12 +453,21 @@ final class AppModel {
     var sessionTotal: Int { activeSession?.orderedAssetIDs.count ?? 0 }
     var sessionCompleted: Int { activeSession?.cursor ?? 0 }
     var sessionRemaining: Int { max(0, sessionTotal - sessionCompleted) }
-    var keptCount: Int { actions.filter { $0.isApplied && $0.decision == .keep }.count }
-    var deleteCount: Int { actions.filter { $0.isApplied && $0.decision == .deletePending }.count }
     var canUndo: Bool { activeSession?.status == .swiping && sessionCompleted > 0 }
     var canRedo: Bool {
         guard let session = activeSession, session.status == .swiping else { return false }
-        return actions.contains { $0.sequence == session.cursor && !$0.isApplied }
+        // Actions are loaded by sequence and stay sorted when a redo branch is replaced.
+        var lower = 0, upper = actions.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if actions[middle].sequence < session.cursor { lower = middle + 1 }
+            else { upper = middle }
+        }
+        while lower < actions.count, actions[lower].sequence == session.cursor {
+            if !actions[lower].isApplied { return true }
+            lower += 1
+        }
+        return false
     }
 
     var reviewCandidateIDs: [String] {
@@ -474,8 +521,8 @@ final class AppModel {
         guard !hasStarted else { return }
         hasStarted = true
         photoLibrary.onLibraryChange = { [weak self] in
-            guard let self, !self.isDeleting else { return }
-            if self.localPhotoChangeDepth > 0 {
+            guard let self else { return }
+            if self.isDeleting || self.localPhotoChangeDepth > 0 || !self.isForeground {
                 self.libraryChangeCoalesced = true
                 return
             }
@@ -505,6 +552,7 @@ final class AppModel {
             await reloadLibrary()
         } else {
             libraryReloadGeneration += 1
+            cancelAnalysisCacheLoad()
             isLoading = false
         }
     }
@@ -529,6 +577,7 @@ final class AppModel {
             await reloadLibrary()
         } else if previousPermission.canRead || !assets.isEmpty {
             libraryReloadGeneration += 1
+            cancelAnalysisCacheLoad()
             isLoading = false
             locationResolutionTask?.cancel()
             cancelTypeAnalysis()
@@ -537,6 +586,7 @@ final class AppModel {
             previewProvider.invalidateCachedImages()
             assetIndex = [:]
             monthGroups = []
+            monthSections = []
             locationGroups = []
             typeGroups = []
             analysisResults = [:]
@@ -561,10 +611,16 @@ final class AppModel {
         if let libraryLoadError, errorMessage == libraryLoadError { errorMessage = nil }
         libraryLoadError = nil
         cancelTypeAnalysis()
+        cancelAnalysisCacheLoad()
         libraryReloadGeneration += 1
         let generation = libraryReloadGeneration
         isLoading = true
-        defer { if generation == libraryReloadGeneration { isLoading = false } }
+        defer {
+            if generation == libraryReloadGeneration {
+                analysisCacheLoadTask = nil
+                isLoading = false
+            }
+        }
         do {
             let fetchedAssets = try await photoLibrary.fetchAssets()
             guard generation == libraryReloadGeneration, permission.canRead else { return }
@@ -591,7 +647,21 @@ final class AppModel {
             guard generation == libraryReloadGeneration, permission.canRead else { return }
             try refreshDecisionCache()
             try loadCachedLocations()
-            let cachedResults = try repository.cachedAnalysis(for: assets, purgeMissing: permission == .full)
+            let cacheTask = Task { [repository, assets] in
+                try await repository.loadAnalysisCache(for: assets)
+            }
+            analysisCacheLoadTask = cacheTask
+            let cache = try await cacheTask.value
+            guard generation == libraryReloadGeneration, permission.canRead else { return }
+            analysisCacheLoadTask = nil
+            if permission == .full, !cache.missingAssetIDs.isEmpty {
+                let existing = try? await photoLibrary.existingAssetIdentifiers(in: cache.missingAssetIDs)
+                guard generation == libraryReloadGeneration, permission == .full else { return }
+                if let existing {
+                    try repository.removeCachedAnalysis(for: cache.missingAssetIDs.subtracting(existing))
+                }
+            }
+            let cachedResults = cache.results
             // Keep valid existing sets visible during matching so a foreground
             // refresh does not temporarily hide Similar Photos or move its scroll anchor.
             similarClusters = similarClusters.filter { cluster in
@@ -633,6 +703,11 @@ final class AppModel {
         }
     }
 
+    private func cancelAnalysisCacheLoad() {
+        analysisCacheLoadTask?.cancel()
+        analysisCacheLoadTask = nil
+    }
+
     func toggleSelection(_ group: MediaGroup) {
         guard activeSession == nil else { return }
         if selectedGroupIDs.contains(group.id) {
@@ -648,6 +723,7 @@ final class AppModel {
             resumeSession()
             return
         }
+        guard !isLoading, libraryLoadError == nil else { return }
         let plan = selectedCleanupPlan
         let ordered = plan.assetIDs
         guard !ordered.isEmpty else { return }
@@ -706,17 +782,25 @@ final class AppModel {
               session.cursor < session.orderedAssetIDs.count, currentComparison == nil else { return }
         let assetIdentifier = session.orderedAssetIDs[session.cursor]
         do {
-            let sequence = session.cursor
-            let action = try repository.recordDecision(
-                session: session, assetIdentifier: assetIdentifier, decision: decision
-            )
-            decisionsByAssetID[assetIdentifier] = decision
-            actions.removeAll { $0.sequence >= sequence }
-            actions.append(action)
+            try CleanupPerformance.measure("Decision commit") {
+                let sequence = session.cursor
+                let action = try repository.recordDecision(
+                    session: session, assetIdentifier: assetIdentifier, decision: decision
+                )
+                decisionsByAssetID[assetIdentifier] = decision
+                discardRedoActions(from: sequence)
+                actions.append(action)
+            }
             await advanceAfterDecision()
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func discardRedoActions(from sequence: Int) {
+        // A normal forward swipe has no redo suffix to scan or remove.
+        guard let last = actions.last, last.sequence >= sequence else { return }
+        actions.removeAll { $0.sequence >= sequence }
     }
 
     func undo() {
@@ -842,7 +926,12 @@ final class AppModel {
         let fullyReviewed = session.cursor >= session.orderedAssetIDs.count
         let selected = session.reviewSelectedIDs
         isDeleting = true
-        defer { isDeleting = false }
+        defer {
+            isDeleting = false
+            if libraryChangeCoalesced && isForeground {
+                Task { await self.refreshForForeground() }
+            }
+        }
 
         do {
             session.status = .deleting
@@ -993,6 +1082,8 @@ final class AppModel {
     private func rebuildGroupsOffMain(expectedReloadGeneration: Int? = nil) async throws {
         groupBuildGeneration += 1
         let generation = groupBuildGeneration
+        typeGroupBuildGeneration += 1
+        let typeGeneration = typeGroupBuildGeneration
         let completions = try completionSnapshots()
         let assets = assets
         let decisions = decisionsByAssetID
@@ -1016,7 +1107,12 @@ final class AppModel {
         monthGroups = result.month
         monthSections = Self.buildMonthSections(result.month)
         locationGroups = result.location
-        typeGroups = result.type
+        // Type progress may finish while this full rebuild is running. Keep its
+        // newer Type result without discarding the Month and Location rebuild.
+        if typeGeneration > publishedTypeGroupGeneration {
+            typeGroups = result.type
+            publishedTypeGroupGeneration = typeGeneration
+        }
         reconcileSelectedGroups()
     }
 
@@ -1140,8 +1236,8 @@ final class AppModel {
     }
 
     private func publishTypeGroups(generation: Int) async {
-        groupBuildGeneration += 1
-        let groupGeneration = groupBuildGeneration
+        typeGroupBuildGeneration += 1
+        let groupGeneration = typeGroupBuildGeneration
         let snapshot = assets, decisions = decisionsByAssetID, results = analysisResults
         let similarIDs = Set(similarClusters.flatMap(\.assetIDs))
         let groups = await Task.detached(priority: .utility) {
@@ -1149,9 +1245,10 @@ final class AppModel {
             defer { AnalysisPerformance.end(.groups, interval) }
             return Self.buildTypeGroups(assets: snapshot, decisions: decisions, analysis: results, similarIDs: similarIDs)
         }.value
-        guard !Task.isCancelled, generation == typeAnalysisGeneration, groupGeneration == groupBuildGeneration,
+        guard !Task.isCancelled, generation == typeAnalysisGeneration, groupGeneration == typeGroupBuildGeneration,
               permission.canRead, grouping == .type, route == .dashboard else { return }
         typeGroups = groups
+        publishedTypeGroupGeneration = groupGeneration
         reconcileSelectedGroups()
     }
 
@@ -1166,6 +1263,12 @@ final class AppModel {
             locationResolutionTask?.cancel()
             locationResolutionTask = nil
         }
+    }
+
+    func retryUnavailableAnalysis() {
+        guard !isAnalyzingTypes else { return }
+        attemptedAnalysisIDs.removeAll(keepingCapacity: true)
+        startTypeAnalysis()
     }
 
     private func startTypeAnalysis() {
@@ -1430,11 +1533,13 @@ final class AppModel {
         let lower = max(0, session.cursor - 1)
         let upper = min(session.orderedAssetIDs.count, session.cursor + 4)
         guard lower < upper else { return }
-        previewProvider.startCaching(
-            identifiers: Array(session.orderedAssetIDs[lower..<upper]),
-            targetSize: PreviewImageConfiguration.cardTargetSize,
-            kind: .active
-        )
+        CleanupPerformance.measure("Preview preheat") {
+            previewProvider.startCaching(
+                identifiers: Array(session.orderedAssetIDs[lower..<upper]),
+                targetSize: PreviewImageConfiguration.cardTargetSize,
+                kind: .active
+            )
+        }
     }
 
     func preheatComparison(targetSize: CGSize) {

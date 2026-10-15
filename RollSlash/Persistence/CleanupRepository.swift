@@ -1,6 +1,10 @@
 import Foundation
 import SwiftData
 
+protocol AnalysisCacheReading: Sendable {
+    func load(for assets: [PhotoAssetDescriptor]) async throws -> MediaAnalysisCacheSnapshot
+}
+
 struct CleanupStoreError: LocalizedError, Equatable {
     static let deletionInProgress = CleanupStoreError(
         message: String(localized: "Roll Slash is still confirming a deletion. Finish that before starting another cleanup.")
@@ -34,7 +38,8 @@ protocol CleanupRepository: AnyObject {
     func cachedLocations(for bucketKeys: Set<String>, localeIdentifier: String) throws -> [String: ResolvedLocation]
     func cacheLocation(_ location: ResolvedLocation, for bucketKey: String) throws
     func resetHistory() throws
-    func cachedAnalysis(for assets: [PhotoAssetDescriptor], purgeMissing: Bool) throws -> [String: MediaAnalysisResult]
+    func loadAnalysisCache(for assets: [PhotoAssetDescriptor]) async throws -> MediaAnalysisCacheSnapshot
+    func removeCachedAnalysis(for assetIdentifiers: Set<String>) throws
     func cacheAnalysis(_ result: MediaAnalysisResult, for asset: PhotoAssetDescriptor) throws
     func cacheAnalysis(_ entries: [MediaAnalysisCacheEntry]) throws
 }
@@ -43,16 +48,17 @@ protocol CleanupRepository: AnyObject {
 final class SwiftDataCleanupRepository: CleanupRepository {
     private let context: ModelContext
     private let analysisContext: ModelContext
-    private var analysisIndex: [String: MediaAnalysisCacheRecord]?
     private let analysisEncoder = JSONEncoder()
-    private let analysisDecoder = JSONDecoder()
+    private let analysisReader: any AnalysisCacheReading
     private let saveChanges: (ModelContext) throws -> Void
 
-    init(container: ModelContainer, saveChanges: @escaping (ModelContext) throws -> Void = { try $0.save() }) {
+    init(container: ModelContainer, analysisReader: (any AnalysisCacheReading)? = nil,
+         saveChanges: @escaping (ModelContext) throws -> Void = { try $0.save() }) {
         context = ModelContext(container)
         context.autosaveEnabled = true
         analysisContext = ModelContext(container)
         analysisContext.autosaveEnabled = false
+        self.analysisReader = analysisReader ?? AnalysisCacheReader(container: container)
         self.saveChanges = saveChanges
     }
 
@@ -213,30 +219,26 @@ final class SwiftDataCleanupRepository: CleanupRepository {
         }
     }
 
-    func cachedAnalysis(for assets: [PhotoAssetDescriptor], purgeMissing: Bool = true) throws -> [String: MediaAnalysisResult] {
-        let signatures = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, MediaAnalysisResult.signature(for: $0)) })
-        var results: [String: MediaAnalysisResult] = [:]
-        analysisIndex = nil
-        var index: [String: MediaAnalysisCacheRecord] = [:]
-        for record in try analysisContext.fetch(FetchDescriptor<MediaAnalysisCacheRecord>()) {
-            guard let signature = signatures[record.assetIdentifier] else {
-                if purgeMissing {
-                    analysisContext.delete(record)
-                } else {
-                    index[record.assetIdentifier] = record
-                }
-                continue
+    func loadAnalysisCache(for assets: [PhotoAssetDescriptor]) async throws -> MediaAnalysisCacheSnapshot {
+        try await analysisReader.load(for: assets)
+    }
+
+    // Only identifiers verified absent from Photos may be removed. Hidden media
+    // and media outside limited access retain their completed analysis.
+    func removeCachedAnalysis(for assetIdentifiers: Set<String>) throws {
+        guard !assetIdentifiers.isEmpty else { return }
+        do {
+            for identifiers in Array(assetIdentifiers).chunks(of: 200) {
+                let descriptor = FetchDescriptor<MediaAnalysisCacheRecord>(
+                    predicate: #Predicate { identifiers.contains($0.assetIdentifier) }
+                )
+                try analysisContext.fetch(descriptor).forEach(analysisContext.delete)
             }
-            guard signature == record.signature else {
-                analysisContext.delete(record)
-                continue
-            }
-            results[record.assetIdentifier] = record.decodedResult(using: analysisDecoder)
-            index[record.assetIdentifier] = record
+            try analysisContext.save()
+        } catch {
+            analysisContext.rollback()
+            throw error
         }
-        do { try analysisContext.save(); analysisIndex = index }
-        catch { analysisContext.rollback(); throw error }
-        return results
     }
 
     func cacheAnalysis(_ result: MediaAnalysisResult, for asset: PhotoAssetDescriptor) throws {
@@ -248,26 +250,28 @@ final class SwiftDataCleanupRepository: CleanupRepository {
         let interval = AnalysisPerformance.begin(.cache)
         defer { AnalysisPerformance.end(.cache, interval) }
         do {
-            if analysisIndex == nil {
-                analysisIndex = Dictionary(uniqueKeysWithValues:
-                    try analysisContext.fetch(FetchDescriptor<MediaAnalysisCacheRecord>()).map { ($0.assetIdentifier, $0) })
+            var index: [String: MediaAnalysisCacheRecord] = [:]
+            for identifiers in Array(Set(entries.map { $0.asset.id })).chunks(of: 200) {
+                let descriptor = FetchDescriptor<MediaAnalysisCacheRecord>(
+                    predicate: #Predicate { identifiers.contains($0.assetIdentifier) }
+                )
+                for record in try analysisContext.fetch(descriptor) { index[record.assetIdentifier] = record }
             }
             for entry in entries {
                 let id = entry.asset.id
                 let signature = MediaAnalysisResult.signature(for: entry.asset)
-                if let existing = analysisIndex?[id] {
+                if let existing = index[id] {
                     existing.signature = signature
                     existing.resultData = try analysisEncoder.encode(entry.result)
                 } else {
                     let record = try MediaAnalysisCacheRecord(assetIdentifier: id, signature: signature, result: entry.result)
                     analysisContext.insert(record)
-                    analysisIndex?[id] = record
+                    index[id] = record
                 }
             }
             try analysisContext.save()
         } catch {
             analysisContext.rollback()
-            analysisIndex = nil
             throw error
         }
     }
@@ -413,6 +417,35 @@ final class SwiftDataCleanupRepository: CleanupRepository {
         try context.delete(model: CleanupSessionRecord.self)
         try context.delete(model: GroupCompletionRecord.self)
         try context.save()
+    }
+}
+
+private actor AnalysisCacheReader: AnalysisCacheReading {
+    private let container: ModelContainer
+
+    init(container: ModelContainer) { self.container = container }
+
+    func load(for assets: [PhotoAssetDescriptor]) throws -> MediaAnalysisCacheSnapshot {
+        try Task.checkCancellation()
+        // A fresh actor-owned context sees batches saved by the writer and never
+        // transfers SwiftData model objects to the main actor.
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let decoder = JSONDecoder()
+        let signatures = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, MediaAnalysisResult.signature(for: $0)) })
+        var results: [String: MediaAnalysisResult] = [:]
+        var missingAssetIDs = Set<String>()
+        try Task.checkCancellation()
+        for record in try context.fetch(FetchDescriptor<MediaAnalysisCacheRecord>()) {
+            try Task.checkCancellation()
+            guard let signature = signatures[record.assetIdentifier] else {
+                missingAssetIDs.insert(record.assetIdentifier)
+                continue
+            }
+            guard signature == record.signature else { continue }
+            results[record.assetIdentifier] = record.decodedResult(using: decoder)
+        }
+        return MediaAnalysisCacheSnapshot(results: results, missingAssetIDs: missingAssetIDs)
     }
 }
 

@@ -9,6 +9,43 @@ import UIKit
 @MainActor
 @Suite("Cleanup flow")
 struct AppModelTests {
+    @Test("cleanup header tallies stay fast with a large action history")
+    func cachedHeaderTallies() throws {
+        let model = try makeHarness().model
+        let sessionID = UUID()
+        let history = (0..<5_000).map { index in
+            CleanupActionRecord(sessionIdentifier: sessionID, sequence: index, assetIdentifier: "history-\(index)",
+                decision: index.isMultiple(of: 2) ? .keep : .deletePending, isApplied: !index.isMultiple(of: 3))
+        }
+        model.actions = history
+        let expectedKept = history.filter { $0.isApplied && $0.decision == .keep }.count
+        let expectedDeleted = history.filter { $0.isApplied && $0.decision == .deletePending }.count
+        #expect(model.keptCount == expectedKept)
+        #expect(model.deleteCount == expectedDeleted)
+
+        let cachedStart = ContinuousClock.now
+        var cachedTotal = 0
+        for _ in 0..<50 { cachedTotal += model.keptCount + model.deleteCount }
+        let cachedDuration = cachedStart.duration(to: .now)
+        let scanStart = ContinuousClock.now
+        var scannedTotal = 0
+        for _ in 0..<50 {
+            scannedTotal += history.filter { $0.isApplied && $0.decision == .keep }.count
+            scannedTotal += history.filter { $0.isApplied && $0.decision == .deletePending }.count
+        }
+        let scanDuration = scanStart.duration(to: .now)
+        #expect(cachedTotal == scannedTotal)
+        print("5,000-action header, 50 refreshes: cached \(cachedDuration), history scans \(scanDuration)")
+        #expect(cachedDuration * 5 < scanDuration)
+
+        model.actions.removeLast()
+        #expect(model.keptCount == expectedKept)
+        #expect(model.deleteCount == expectedDeleted - 1)
+        model.actions = []
+        #expect(model.keptCount == 0)
+        #expect(model.deleteCount == 0)
+    }
+
     @Test("horizontal swipes commit and vertical drags do not")
     func swipeCommitRules() {
         #expect(CleanupSwipe.decision(translation: CGSize(width: 120, height: 10), predictedEnd: CGSize(width: 120, height: 10)) == .keep)
@@ -296,6 +333,34 @@ struct AppModelTests {
         #expect(harness.client.deletedIdentifiers == ["feb"])
         #expect(harness.client.deletionCallCount == 1)
         #expect(harness.model.route == .completion)
+    }
+
+    @Test("library changes during a cancelled deletion reload after the deletion lock is released")
+    func cancelledDeletionDrainsLibraryChanges() async throws {
+        let harness = try makeHarness()
+        await harness.model.start()
+        let group = try #require(harness.model.monthGroups.first { $0.key.value == "2026-02" })
+        harness.model.toggleSelection(group)
+        harness.model.beginSelectedCleanup()
+        await harness.model.decide(.deletePending)
+        let fetches = harness.client.fetchCallCount
+        harness.client.suspendEstimates = true
+        let commit = Task { await harness.model.commitDeletion() }
+        await harness.client.waitForSuspendedOperation()
+        let newAsset = makeAsset(id: "synced-during-deletion", date: Date())
+        harness.client.assets.append(newAsset)
+        harness.client.onLibraryChange?()
+        #expect(harness.client.fetchCallCount == fetches)
+        harness.client.shouldFailDeletion = true
+        harness.client.resumeOperation()
+        await commit.value
+        let deadline = ContinuousClock.now + .seconds(5)
+        while harness.model.assetIndex[newAsset.id] == nil, ContinuousClock.now < deadline { await Task.yield() }
+        #expect(harness.client.fetchCallCount == fetches + 1)
+        #expect(harness.model.assetIndex[newAsset.id] != nil)
+        #expect(!harness.model.isDeleting)
+        #expect(harness.model.activeSession?.status == .reviewing)
+        #expect(harness.client.deletedIdentifiers.isEmpty)
     }
 
     @Test("limited access preserves a submitted deletion until full-access recovery")

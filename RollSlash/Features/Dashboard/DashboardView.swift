@@ -154,8 +154,11 @@ struct DashboardView: View {
                         Text("Photos can appear in more than one group. Analysis uses local media without iCloud downloads.")
                             .font(.caption).foregroundStyle(.secondary)
                         if !appModel.isAnalyzingTypes && appModel.typeAnalysisUnavailableCount > 0 {
-                            Text("\(appModel.typeAnalysisUnavailableCount) photos could not be fully analyzed. Roll Slash will retry when they become available.")
+                            Text("\(appModel.typeAnalysisUnavailableCount) photos could not be fully analyzed. Open photos to download them, then retry unavailable photos.")
                                 .font(.caption).foregroundStyle(.secondary)
+                            Button("Retry unavailable photos") { appModel.retryUnavailableAnalysis() }
+                                .font(.caption)
+                                .accessibilityIdentifier("retry-type-analysis")
                         }
                         if let warning = appModel.similarityWarning {
                             Text(warning).font(.caption).foregroundStyle(.secondary)
@@ -164,7 +167,7 @@ struct DashboardView: View {
                     .padding(.horizontal).padding(.bottom, 8)
                 }
 
-                if appModel.isLoading && appModel.assets.isEmpty {
+                if appModel.isLoading && appModel.visibleGroups.isEmpty {
                     Spacer()
                     ProgressView("Reading your library…")
                     Spacer()
@@ -207,7 +210,7 @@ struct DashboardView: View {
                 }
                 .buttonStyle(.glassProminent)
                 .tint(RollSlashTheme.violet)
-                .disabled(selectedCount == 0)
+                .disabled(selectedCount == 0 || appModel.isLoading || appModel.libraryLoadError != nil)
                 .accessibilityIdentifier("clean-selected")
                 .padding()
             }

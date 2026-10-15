@@ -267,9 +267,4 @@ final class MediaAnalysisCacheRecord {
         try? decoder.decode(MediaAnalysisResult.self, from: resultData)
     }
 
-    var result: MediaAnalysisResult? {
-        decodedResult(using: Self.sharedDecoder)
-    }
-
-    private static let sharedDecoder = JSONDecoder()
 }

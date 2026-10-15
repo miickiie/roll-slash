@@ -30,9 +30,15 @@ final class RollSlashUITests: XCTestCase {
         videoGroup.tap()
         app.buttons["clean-selected"].tap()
         XCTAssertTrue(app.buttons["open-media-viewer"].waitForExistence(timeout: 3))
+        let cardRetry = app.buttons["retry-card-preview"]
+        XCTAssertTrue(cardRetry.waitForExistence(timeout: 3))
+        cardRetry.tap()
+        XCTAssertTrue(cardRetry.waitForExistence(timeout: 3))
         app.buttons["open-media-viewer"].tap()
+        XCTAssertTrue(app.buttons["close-media-viewer"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["Preview unavailable"].waitForExistence(timeout: 3))
-        let retry = app.buttons["Retry"]
+        XCTAssertFalse(cardRetry.isHittable)
+        let retry = app.buttons["retry-media-preview"]
         XCTAssertTrue(retry.exists)
         retry.tap()
         XCTAssertTrue(app.staticTexts["Preview unavailable"].waitForExistence(timeout: 3))

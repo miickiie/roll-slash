@@ -185,21 +185,21 @@ struct TypeGroupingTests {
     }
 
     @Test("cache persists across model contexts and history reset, but invalidates content and algorithm changes")
-    func cachePersistence() throws {
+    func cachePersistence() async throws {
         let harness = try makeHarness()
         let repository = SwiftDataCleanupRepository(container: harness.container)
         let original = makeAsset("cache", modified: Date(timeIntervalSince1970: 1))
         try repository.cacheAnalysis(TypeFixtureAnalysis.result, for: original)
         let newRepository = SwiftDataCleanupRepository(container: harness.container)
-        #expect(try newRepository.cachedAnalysis(for: [original])[original.id] == TypeFixtureAnalysis.result)
+        #expect(try await newRepository.loadAnalysisCache(for: [original]).results[original.id] == TypeFixtureAnalysis.result)
         try newRepository.resetHistory()
-        #expect(try newRepository.cachedAnalysis(for: [original])[original.id] != nil)
+        #expect(try await newRepository.loadAnalysisCache(for: [original]).results[original.id] != nil)
         let modified = makeAsset("cache", modified: Date(timeIntervalSince1970: 2))
-        #expect(try newRepository.cachedAnalysis(for: [modified]).isEmpty)
+        #expect(try await newRepository.loadAnalysisCache(for: [modified]).results.isEmpty)
         let context = ModelContext(harness.container)
         context.insert(try MediaAnalysisCacheRecord(assetIdentifier: original.id, signature: "old-algorithm", result: TypeFixtureAnalysis.result))
         try context.save()
-        #expect(try newRepository.cachedAnalysis(for: [original]).isEmpty)
+        #expect(try await newRepository.loadAnalysisCache(for: [original]).results.isEmpty)
     }
 
     @Test("leaving Type and revoking access discard stale analysis results")
@@ -272,23 +272,56 @@ struct TypeGroupingTests {
         #expect(await service.analyzedIDs.isEmpty)
     }
 
-    @Test("partial cache reads retain hidden records for upsert and full reads purge removed assets")
-    func partialCacheUpsertAndPurge() throws {
+    @Test("cache reads retain absent records until explicitly confirmed deleted")
+    func partialCacheUpsertAndPurge() async throws {
         let harness = try makeHarness()
         let repository = SwiftDataCleanupRepository(container: harness.container)
         let a = makeAsset("a"), b = makeAsset("b")
         try repository.cacheAnalysis(TypeFixtureAnalysis.result, for: a)
         try repository.cacheAnalysis(TypeFixtureAnalysis.result, for: b)
-        #expect(try repository.cachedAnalysis(for: [a], purgeMissing: false).keys.sorted() == ["a"])
+        let visible = try await repository.loadAnalysisCache(for: [a])
+        #expect(visible.results.keys.sorted() == ["a"])
+        #expect(visible.missingAssetIDs == ["b"])
         var updated = TypeFixtureAnalysis.result
         updated.isLarge = false
         try repository.cacheAnalysis(updated, for: b)
         let restored = SwiftDataCleanupRepository(container: harness.container)
-        #expect(try restored.cachedAnalysis(for: [a, b])["b"] == updated)
+        #expect(try await restored.loadAnalysisCache(for: [a, b]).results["b"] == updated)
         let records = try ModelContext(harness.container).fetch(FetchDescriptor<MediaAnalysisCacheRecord>())
         #expect(records.count == 2)
-        _ = try restored.cachedAnalysis(for: [a], purgeMissing: true)
-        #expect(try restored.cachedAnalysis(for: [a, b])["b"] == nil)
+        try restored.removeCachedAnalysis(for: ["b"])
+        #expect(try await restored.loadAnalysisCache(for: [a, b]).results["b"] == nil)
+    }
+
+    @Test("hiding and unhiding photos retains completed analysis; confirmed deletions purge it", arguments: [false, true])
+    func hiddenPhotoAnalysisIsRetained(verificationFails: Bool) async throws {
+        let service = CountingCachedAnalysis()
+        let harness = try makeHarness(analysis: service)
+        let original = harness.library.assets
+        await harness.model.start()
+        harness.model.grouping = .type
+        try await awaitAnalysis(harness.model)
+        #expect(await service.analyzedIDs.count == 2)
+
+        harness.library.hiddenAssetIDs = ["b"]
+        harness.library.assets.removeAll { $0.id == "b" }
+        harness.library.failVerification = verificationFails
+        await harness.model.reloadLibrary()
+        #expect(harness.model.libraryLoadError == nil)
+        #expect(harness.model.analysisResults["b"] == nil)
+        harness.library.assets = original
+        await harness.model.reloadLibrary()
+        try await awaitAnalysis(harness.model)
+        #expect(harness.model.analysisResults["b"]?.isComplete == true)
+        #expect(await service.analyzedIDs.count == 2)
+
+        harness.library.failVerification = false
+        harness.library.hiddenAssetIDs = []
+        harness.library.assets.removeAll { $0.id == "b" }
+        await harness.model.reloadLibrary()
+        let cache = try await SwiftDataCleanupRepository(container: harness.container).loadAnalysisCache(for: original)
+        #expect(cache.results["b"] == nil)
+        #expect(cache.results["a"]?.isComplete == true)
     }
 
     @Test("unavailable media remains retryable and similarity capability failures are visible")
@@ -327,6 +360,34 @@ struct TypeGroupingTests {
         harness.model.setForeground(false)
         harness.model.setForeground(true)
         #expect(!harness.model.isAnalyzingTypes)
+    }
+
+    @Test("explicit retry reruns only unavailable photos and preserves completed phases")
+    func explicitRetryPreservesCompletedAnalysis() async throws {
+        let service = ControlledBalancedAnalysis()
+        let harness = try makeHarness(analysis: service)
+        let repository = SwiftDataCleanupRepository(container: harness.container)
+        try repository.cacheAnalysis(TypeFixtureAnalysis.result, for: harness.library.assets[0])
+        let partial = MediaAnalysisResult(isLarge: false, similarityUnavailable: true)
+        try repository.cacheAnalysis(partial, for: harness.library.assets[1])
+        await harness.model.start()
+        harness.model.grouping = .type
+        await service.waitForRequests(1)
+        await service.finish("b", result: partial)
+        try await awaitAnalysis(harness.model)
+        harness.model.grouping = .month
+        harness.model.grouping = .type
+        #expect(!harness.model.isAnalyzingTypes)
+
+        harness.model.retryUnavailableAnalysis()
+        await service.waitForRequests(2)
+        #expect(await service.requestedIDs == ["b", "b"])
+        #expect(await service.cachedResult(for: "b") == partial)
+        await service.finish("b")
+        try await awaitAnalysis(harness.model)
+        #expect(harness.model.typeAnalysisUnavailableCount == 0)
+        #expect(harness.model.analysisResults["a"] == TypeFixtureAnalysis.result)
+        #expect(harness.model.analysisResults["b"]?.isLarge == false)
     }
 
     @Test("Type scroll anchors are independent and recover from hidden groups")
@@ -446,7 +507,7 @@ struct TypeGroupingTests {
         #expect(harness.model.typeAnalysisCompleted == 1)
         #expect(harness.model.analysisResults["b"]?.isComplete == true)
         harness.model.grouping = .month
-        let saved = try SwiftDataCleanupRepository(container: harness.container).cachedAnalysis(for: harness.library.assets)
+        let saved = try await SwiftDataCleanupRepository(container: harness.container).loadAnalysisCache(for: harness.library.assets).results
         #expect(saved["b"]?.isComplete == true)
         #expect(saved["a"] == partial)
         await service.finish("a")
@@ -476,7 +537,7 @@ struct TypeGroupingTests {
         let deadline = Date().addingTimeInterval(5)
         while saved == nil && Date() < deadline {
             try await Task.sleep(for: .milliseconds(100))
-            saved = try SwiftDataCleanupRepository(container: harness.container).cachedAnalysis(for: harness.library.assets)["b"]
+            saved = try await SwiftDataCleanupRepository(container: harness.container).loadAnalysisCache(for: harness.library.assets).results["b"]
         }
         #expect(saved?.isComplete == true)
         #expect(harness.model.isAnalyzingTypes)
@@ -485,7 +546,7 @@ struct TypeGroupingTests {
     }
 
     @Test("batched analysis upserts persist independently of cleanup history")
-    func batchedCache() throws {
+    func batchedCache() async throws {
         let harness = try makeHarness()
         let repository = SwiftDataCleanupRepository(container: harness.container)
         let assets = (0..<50).map { makeAsset("batch-\($0)") }
@@ -494,13 +555,13 @@ struct TypeGroupingTests {
         try repository.cacheAnalysis(assets.prefix(25).map { MediaAnalysisCacheEntry(asset: $0, result: negative) })
         try repository.resetHistory()
         let reloaded = SwiftDataCleanupRepository(container: harness.container)
-        let saved = try reloaded.cachedAnalysis(for: assets)
+        let saved = try await reloaded.loadAnalysisCache(for: assets).results
         #expect(saved.count == 50)
         #expect(saved["batch-0"] == negative)
         #expect(saved["batch-49"] == TypeFixtureAnalysis.result)
         #expect(try ModelContext(harness.container).fetchCount(FetchDescriptor<MediaAnalysisCacheRecord>()) == 50)
         let modified = makeAsset("batch-0", modified: Date(timeIntervalSince1970: 4))
-        #expect(try reloaded.cachedAnalysis(for: [modified]).isEmpty)
+        #expect(try await reloaded.loadAnalysisCache(for: [modified]).results.isEmpty)
     }
 
     @Test("undo and redo preserve drafts in subsequent comparisons, including relaunch")
@@ -603,6 +664,173 @@ struct TypeGroupingTests {
         await reload.value
     }
 
+    @Test("new cleanup waits for a coherent cache snapshot, including after a failed read")
+    func cleanupWaitsForCacheReload() async throws {
+        let reader = ControlledAnalysisCacheReader()
+        let harness = try makeHarness(cacheReader: reader)
+        await harness.model.start()
+        harness.model.grouping = .type
+        harness.model.setForeground(false)
+        let similar = try #require(harness.model.typeGroups.first { $0.key.value == "similarPhotos" })
+        harness.model.toggleSelection(similar)
+        #expect(harness.model.selectedCandidateCount == 2)
+
+        await reader.suspend()
+        let editedDate = Date(timeIntervalSince1970: 42)
+        harness.library.assets[1] = makeAsset("b", modified: editedDate)
+        let reload = Task { await harness.model.reloadLibrary() }
+        await reader.waitForPending(1)
+        #expect(harness.model.assetIndex["b"]?.modificationDate == editedDate)
+        #expect(harness.model.isLoading)
+        harness.model.beginSelectedCleanup()
+        #expect(harness.model.activeSession == nil)
+        #expect(harness.model.route == .dashboard)
+
+        await reader.fail(at: 0)
+        await reload.value
+        #expect(!harness.model.isLoading)
+        #expect(harness.model.libraryLoadError != nil)
+        harness.model.beginSelectedCleanup()
+        #expect(harness.model.activeSession == nil)
+
+        let retry = Task { await harness.model.reloadLibrary() }
+        await reader.waitForPending(1)
+        await reader.finish(at: 0, results: ["a": TypeFixtureAnalysis.result])
+        await retry.value
+        #expect(harness.model.libraryLoadError == nil)
+        #expect(harness.model.similarClusters.isEmpty)
+        #expect(!harness.model.selectedGroupIDs.contains(similar.id))
+        let livePhotos = try #require(harness.model.typeGroups.first { $0.key.value == "livePhotos" })
+        harness.model.toggleSelection(livePhotos)
+        harness.model.beginSelectedCleanup()
+        #expect(harness.model.activeSession?.orderedAssetIDs == ["a"])
+        #expect(harness.model.currentComparison == nil)
+        #expect(harness.model.route == .cleanup)
+    }
+
+    @Test("an existing cleanup can resume while its library cache refreshes")
+    func resumeDuringCacheReload() async throws {
+        let reader = ControlledAnalysisCacheReader()
+        let harness = try makeHarness(cacheReader: reader)
+        await harness.model.start()
+        harness.model.toggleSelection(try #require(harness.model.monthGroups.first))
+        harness.model.beginSelectedCleanup()
+        let sessionID = try #require(harness.model.activeSession?.identifier)
+        harness.model.route = .dashboard
+
+        await reader.suspend()
+        let reload = Task { await harness.model.reloadLibrary() }
+        await reader.waitForPending(1)
+        harness.model.beginSelectedCleanup()
+        #expect(harness.model.isLoading)
+        #expect(harness.model.activeSession?.identifier == sessionID)
+        #expect(harness.model.route == .cleanup)
+        await reader.finish(at: 0)
+        await reload.value
+    }
+
+    @Test("overlapping library refreshes cancel obsolete cache work and preserve the latest load")
+    func supersededCacheReadsAreCancelled() async throws {
+        let reader = ControlledAnalysisCacheReader()
+        let harness = try makeHarness(cacheReader: reader)
+        await harness.model.start()
+        #expect(await reader.scanCount == 1)
+        await reader.suspend()
+        let oldest = Task { await harness.model.reloadLibrary() }
+        await reader.waitForPending(1)
+        harness.library.assets.removeAll { $0.id == "b" }
+        let middle = Task { await harness.model.reloadLibrary() }
+        await reader.waitForPending(2)
+        harness.library.assets.removeAll { $0.id != "v" }
+        let latest = Task { await harness.model.reloadLibrary() }
+        await reader.waitForPending(3)
+
+        await reader.finish(at: 0)
+        await reader.finish(at: 0)
+        await oldest.value
+        await middle.value
+        #expect(await reader.scanCount == 1)
+        #expect(harness.model.isLoading)
+        #expect(harness.model.errorMessage == nil)
+        #expect(harness.model.assets.map(\.id) == ["v"])
+
+        await reader.finish(at: 0)
+        await latest.value
+        #expect(await reader.scanCount == 2)
+        #expect(!harness.model.isLoading)
+        #expect(harness.model.libraryLoadError == nil)
+        #expect(harness.model.typeGroups.map(\.key.value) == ["videos"])
+    }
+
+    @Test("revoking Photos access cancels a pending cache read")
+    func revokedAccessCancelsCacheRead() async throws {
+        let reader = ControlledAnalysisCacheReader()
+        let harness = try makeHarness(cacheReader: reader)
+        await harness.model.start()
+        await reader.suspend()
+        let reload = Task { await harness.model.reloadLibrary() }
+        await reader.waitForPending(1)
+        harness.library.permission = .denied
+        await harness.model.refreshAuthorization()
+        await reader.finish(at: 0)
+        await reload.value
+        #expect(await reader.scanCount == 1)
+        #expect(harness.model.assets.isEmpty)
+        #expect(harness.model.analysisResults.isEmpty)
+        #expect(harness.model.libraryLoadError == nil)
+        #expect(!harness.model.isLoading)
+    }
+
+    @Test("a cancelled cache read exits before fetching even when the cache is empty")
+    func cancelledEmptyCacheRead() async throws {
+        let harness = try makeHarness()
+        let repository = SwiftDataCleanupRepository(container: harness.container)
+        let read = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await repository.loadAnalysisCache(for: [])
+        }
+        do {
+            _ = try await read.value
+            Issue.record("An already cancelled read must not fetch the cache")
+        } catch is CancellationError {
+        }
+    }
+
+    @Test("Type progress overlapping a full history rebuild preserves all dashboard groups")
+    func typeProgressDoesNotDiscardFullRebuild() async throws {
+        let service = ControlledBalancedAnalysis()
+        let harness = try makeHarness(analysis: service)
+        harness.library.assets += (0..<50_000).map { index in
+            PhotoAssetDescriptor(id: "metadata-\(index)", creationDate: Date(timeIntervalSince1970: Double(index) * 86_400),
+                coordinate: nil, mediaKind: .video, duration: 1, pixelWidth: 100, pixelHeight: 100)
+        }
+        let repository = SwiftDataCleanupRepository(container: harness.container)
+        try repository.markCompleted(groupKey: "month:1900-01", label: "January 1900")
+        try repository.markCompleted(groupKey: "location:resolved:ghost", label: "Old place")
+        await harness.model.start()
+        #expect(harness.model.monthGroups.contains { $0.id == "month:1900-01" })
+        #expect(harness.model.locationGroups.contains { $0.id == "location:resolved:ghost" })
+        harness.model.grouping = .type
+        await service.waitForRequests(2)
+        harness.model.selectedGroupIDs = ["type:videos"]
+        let reset = Task { await harness.model.resetHistory() }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !harness.model.selectedGroupIDs.isEmpty, ContinuousClock.now < deadline { await Task.yield() }
+        await service.finish("b")
+        while harness.model.typeAnalysisCompleted == 0, ContinuousClock.now < deadline { await Task.yield() }
+        #expect(harness.model.typeAnalysisCompleted == 1)
+        #expect(await reset.value)
+        while !harness.model.typeGroups.contains(where: { $0.key.value == "largePhotos" }), ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+        #expect(!harness.model.monthGroups.contains { $0.id == "month:1900-01" })
+        #expect(!harness.model.monthSections.flatMap(\.1).contains { $0.id == "month:1900-01" })
+        #expect(!harness.model.locationGroups.contains { $0.id == "location:resolved:ghost" })
+        #expect(harness.model.typeGroups.first { $0.key.value == "largePhotos" }?.assetIDs == ["b"])
+        harness.model.setForeground(false)
+        await service.finish("a")
+    }
+
     private func selectTypes(_ harness: TypeHarness, _ names: [String]) async throws {
         await harness.model.start()
         harness.model.grouping = .type
@@ -621,7 +849,8 @@ struct TypeGroupingTests {
                              duration: 0, pixelWidth: 100, pixelHeight: 100, modificationDate: modified)
     }
 
-    private func makeHarness(analysis: any MediaAnalysisClient = TypeFixtureAnalysis()) throws -> TypeHarness {
+    private func makeHarness(analysis: any MediaAnalysisClient = TypeFixtureAnalysis(),
+                             cacheReader: (any AnalysisCacheReading)? = nil) throws -> TypeHarness {
         let allFlags = PhotoAssetDescriptor(id: "a", creationDate: nil, coordinate: nil, mediaKind: .livePhoto,
             duration: 0, pixelWidth: 100, pixelHeight: 100, isScreenshot: true, isPanorama: true,
             isFavorite: true, burstIdentifier: "burst", isSelfie: true)
@@ -630,7 +859,7 @@ struct TypeGroupingTests {
         let library = TypeTestLibrary(assets: [allFlags, makeAsset("b"), video])
         let container = try ModelContainer(for: RollSlashSchema.schema,
                                            configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
-        return TypeHarness(library: library, container: container, analysis: analysis)
+        return TypeHarness(library: library, container: container, analysis: analysis, cacheReader: cacheReader)
     }
 }
 
@@ -640,12 +869,14 @@ struct TypeGroupingTests {
     let analysis: any MediaAnalysisClient
     let model: AppModel
 
-    init(library: TypeTestLibrary, container: ModelContainer, analysis: any MediaAnalysisClient) {
+    init(library: TypeTestLibrary, container: ModelContainer, analysis: any MediaAnalysisClient,
+         cacheReader: (any AnalysisCacheReading)? = nil) {
         self.library = library
         self.container = container
         self.analysis = analysis
         self.model = AppModel(photoLibrary: library, previewProvider: DemoMediaPreviewProvider(),
-            locationResolver: DemoLocationResolver(), modelContainer: container, analysisClient: analysis)
+            locationResolver: DemoLocationResolver(), modelContainer: container, analysisClient: analysis,
+            analysisCacheReader: cacheReader)
     }
 
     func newModel() -> AppModel {
@@ -654,11 +885,62 @@ struct TypeGroupingTests {
     }
 }
 
+private actor ControlledAnalysisCacheReader: AnalysisCacheReading {
+    private var suspended = false
+    private var pending: [(assets: [PhotoAssetDescriptor], continuation: CheckedContinuation<MediaAnalysisCacheSnapshot, Error>)] = []
+    private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private(set) var scanCount = 0
+
+    func suspend() { suspended = true }
+
+    func load(for assets: [PhotoAssetDescriptor]) async throws -> MediaAnalysisCacheSnapshot {
+        try Task.checkCancellation()
+        let cache: MediaAnalysisCacheSnapshot
+        if suspended {
+            cache = try await withCheckedThrowingContinuation { continuation in
+                pending.append((assets, continuation))
+                let ready = waiters.filter { pending.count >= $0.0 }
+                waiters.removeAll { pending.count >= $0.0 }
+                ready.forEach { $0.1.resume() }
+            }
+        } else {
+            cache = snapshot(for: assets)
+        }
+        // The gate represents a serialized cache read waiting for its turn.
+        try Task.checkCancellation()
+        scanCount += 1
+        return cache
+    }
+
+    func waitForPending(_ count: Int) async {
+        if pending.count >= count { return }
+        await withCheckedContinuation { waiters.append((count, $0)) }
+    }
+
+    func finish(at index: Int, results: [String: MediaAnalysisResult]? = nil) {
+        let entry = pending.remove(at: index)
+        let cache = results.map { MediaAnalysisCacheSnapshot(results: $0, missingAssetIDs: []) }
+            ?? snapshot(for: entry.assets)
+        entry.continuation.resume(returning: cache)
+    }
+
+    func fail(at index: Int) {
+        pending.remove(at: index).continuation.resume(throwing: URLError(.cannotLoadFromNetwork))
+    }
+
+    private func snapshot(for assets: [PhotoAssetDescriptor]) -> MediaAnalysisCacheSnapshot {
+        MediaAnalysisCacheSnapshot(results: Dictionary(uniqueKeysWithValues: assets
+            .filter { $0.mediaKind != .video }.map { ($0.id, TypeFixtureAnalysis.result) }), missingAssetIDs: [])
+    }
+}
+
 @MainActor private final class TypeTestLibrary: PhotoLibraryClient {
     var onLibraryChange: (@MainActor @Sendable () -> Void)?
     var assets: [PhotoAssetDescriptor]
     var permission: PhotoPermission = .full
     var failDeletion = false
+    var hiddenAssetIDs = Set<String>()
+    var failVerification = false
     var deleted = Set<String>()
     private(set) var fetchCount = 0
     init(assets: [PhotoAssetDescriptor]) { self.assets = assets }
@@ -669,7 +951,8 @@ struct TypeGroupingTests {
         return assets
     }
     func existingAssetIdentifiers(in identifiers: Set<String>) async throws -> Set<String> {
-        identifiers.intersection(assets.map(\.id))
+        if failVerification { throw URLError(.cannotLoadFromNetwork) }
+        return identifiers.intersection(Set(assets.map(\.id)).union(hiddenAssetIDs))
     }
     func deleteAssets(with identifiers: [String]) async throws -> Set<String> {
         if failDeletion { throw URLError(.cancelled) }
@@ -789,8 +1072,8 @@ private actor ControlledBalancedAnalysis: MediaAnalysisClient {
         if requestedIDs.count >= count { return }
         await withCheckedContinuation { waiters.append((count, $0)) }
     }
-    func finish(_ id: String) {
-        var result = TypeFixtureAnalysis.result
+    func finish(_ id: String, result override: MediaAnalysisResult? = nil) {
+        var result = override ?? TypeFixtureAnalysis.result
         result.isLarge = cached[id]?.isLarge ?? result.isLarge
         pending.removeValue(forKey: id)?.resume(returning: result)
     }

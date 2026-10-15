@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import OSLog
 import Photos
 import PhotosUI
 import UIKit
@@ -9,6 +10,45 @@ enum PreviewRequestKind: Sendable, Hashable {
     case active
     case comparison
     case fullResolution
+}
+
+struct PreviewFailure: Sendable, Equatable {
+    let domain: String
+    let code: Int
+    let isInCloud: Bool
+
+    init(error: (any Error)? = nil, isInCloud: Bool = false) {
+        let error = error as NSError?
+        domain = error?.domain ?? "PhotoKit"
+        code = error?.code ?? 0
+        self.isInCloud = isInCloud
+    }
+
+    var isMissingResource: Bool {
+        domain == PHPhotosErrorDomain && code == PHPhotosError.Code.missingResource.rawValue && !isInCloud
+    }
+}
+
+enum PreviewResult<Value: Sendable>: Sendable {
+    case success(Value)
+    case failure(PreviewFailure)
+    case cancelled
+
+    var value: Value? {
+        if case .success(let value) = self { return value }
+        return nil
+    }
+}
+
+private enum PreviewDiagnostics {
+    static let logger = Logger(subsystem: "com.rollslash.app", category: "Media preview")
+
+    static func record(_ failure: PreviewFailure, identifier: String, stage: String,
+                       kind: PreviewRequestKind, configuration: PreviewImageConfiguration,
+                       networkAccessAllowed: Bool? = nil) {
+        let network = networkAccessAllowed ?? configuration.options.isNetworkAccessAllowed
+        logger.debug("Preview failure asset=\(identifier, privacy: .private(mask: .hash)) stage=\(stage, privacy: .public) kind=\(String(describing: kind), privacy: .public) size=\(String(describing: configuration.targetSize), privacy: .public) version=\(configuration.options.version.rawValue) network=\(network) domain=\(failure.domain, privacy: .public) code=\(failure.code) cloud=\(failure.isInCloud)")
+    }
 }
 
 /// Keeps sizing, network policy, and final-quality delivery consistent across previews.
@@ -52,50 +92,36 @@ struct PreviewImageRequest: Hashable {
 
 @MainActor
 enum PreviewImageDelivery {
-    static func image(
-        kind: PreviewRequestKind,
-        start: (@escaping @Sendable (UIImage?, [AnyHashable: Any]?) -> Void) -> PHImageRequestID,
-        cancel: @escaping @MainActor @Sendable (PHImageRequestID) -> Void
-    ) async -> UIImage? {
-        guard !Task.isCancelled else { return nil }
-        let stream = AsyncStream<UIImage?> { continuation in
-            let requestID = start { image, info in
-                let cancelled = info?[PHImageCancelledKey] as? Bool == true
-                let error = info?[PHImageErrorKey] != nil
-                if !cancelled && !error && kind != .thumbnail,
-                   info?[PHImageResultIsDegradedKey] as? Bool == true { return }
-                continuation.yield(cancelled || error ? nil : image)
-                continuation.finish()
-            }
-            continuation.onTermination = { @Sendable _ in
-                Task { @MainActor in cancel(requestID) }
-            }
-        }
-        for await image in stream { return Task.isCancelled ? nil : image }
-        return nil
-    }
-
     /// Waits for PhotoKit's final callback. Degraded frames stay open until the finished image, an error, or cancellation.
-    static func finalResult<Value: Sendable>(
+    static func result<Value: Sendable>(
+        acceptDegraded: Bool = false,
+        isNetworkAccessAllowed: Bool = false,
         start: (@escaping @Sendable (Value?, [AnyHashable: Any]?) -> Void) -> PHImageRequestID,
         cancel: @escaping @MainActor @Sendable (PHImageRequestID) -> Void
-    ) async -> Value? {
-        guard !Task.isCancelled else { return nil }
-        let stream = AsyncStream<Value?> { continuation in
+    ) async -> PreviewResult<Value> {
+        guard !Task.isCancelled else { return .cancelled }
+        let stream = AsyncStream<PreviewResult<Value>> { continuation in
             let requestID = start { value, info in
                 let cancelled = info?[PHImageCancelledKey] as? Bool == true
-                let error = info?[PHImageErrorKey] != nil
+                let error = info?[PHImageErrorKey] as? any Error
+                let inCloud = info?[PHImageResultIsInCloudKey] as? Bool == true
                 let degraded = info?[PHImageResultIsDegradedKey] as? Bool == true
-                if !cancelled && !error && degraded { return }
-                continuation.yield(cancelled || error ? nil : value)
+                if cancelled { continuation.yield(.cancelled) }
+                else if let error { continuation.yield(.failure(PreviewFailure(error: error, isInCloud: inCloud))) }
+                else if degraded && !acceptDegraded {
+                    // A local-only request may end with a degraded nil callback for a cloud asset.
+                    guard value == nil && inCloud && !isNetworkAccessAllowed else { return }
+                    continuation.yield(.failure(PreviewFailure(isInCloud: true)))
+                } else if let value { continuation.yield(.success(value)) }
+                else { continuation.yield(.failure(PreviewFailure(isInCloud: inCloud))) }
                 continuation.finish()
             }
             continuation.onTermination = { @Sendable _ in
                 Task { @MainActor in cancel(requestID) }
             }
         }
-        for await value in stream { return Task.isCancelled ? nil : value }
-        return nil
+        for await result in stream { return Task.isCancelled ? .cancelled : result }
+        return .cancelled
     }
 }
 
@@ -174,6 +200,11 @@ extension MediaPreviewProvider {
 
 @MainActor
 final class PreviewImageCache {
+    struct Generation: Equatable {
+        let cache: Int
+        let asset: Int
+    }
+
     struct Key: Hashable {
         let identifier: String
         let kind: PreviewRequestKind
@@ -197,7 +228,8 @@ final class PreviewImageCache {
     private let countLimit: Int
     private var entries: [Key: Entry] = [:]
     private var order: [Key] = []
-    private(set) var generation = 0
+    private var generation = 0
+    private var assetGenerations: [String: Int] = [:]
     private(set) var byteCount = 0
 
     init(byteLimit: Int = 48 * 1024 * 1024, countLimit: Int = 96) {
@@ -211,8 +243,12 @@ final class PreviewImageCache {
         return entry.image
     }
 
-    func store(_ image: UIImage, for key: Key, generation: Int) {
-        guard generation == self.generation, countLimit > 0 else { return }
+    func generation(for key: Key) -> Generation {
+        Generation(cache: generation, asset: assetGenerations[key.identifier, default: 0])
+    }
+
+    func store(_ image: UIImage, for key: Key, generation: Generation) {
+        guard generation == self.generation(for: key), countLimit > 0 else { return }
         let cost: Int
         if let pixels = image.cgImage {
             let size = pixels.bytesPerRow.multipliedReportingOverflow(by: pixels.height)
@@ -236,6 +272,7 @@ final class PreviewImageCache {
 
     func removeAll() {
         generation += 1
+        assetGenerations.removeAll()
         entries.removeAll()
         order.removeAll()
         byteCount = 0
@@ -243,7 +280,7 @@ final class PreviewImageCache {
 
     func remove(for identifiers: Set<String>) {
         guard !identifiers.isEmpty else { return }
-        generation += 1
+        for id in identifiers { assetGenerations[id, default: 0] += 1 }
         let toRemove = entries.keys.filter { identifiers.contains($0.identifier) }
         for key in toRemove {
             if let entry = entries.removeValue(forKey: key) {
@@ -256,6 +293,163 @@ final class PreviewImageCache {
     private func touch(_ key: Key) {
         order.removeAll { $0 == key }
         order.append(key)
+    }
+}
+
+/// Shares requests between views while allowing each view to cancel independently.
+@MainActor
+final class PreviewImageLoader {
+    private struct Pending {
+        let id: UUID
+        let task: Task<Void, Never>
+        var waiters: [UUID: CheckedContinuation<UIImage?, Never>]
+    }
+
+    private let cache: PreviewImageCache
+    private var pending: [PreviewImageCache.Key: Pending] = [:]
+    private var missingResources: Set<PreviewImageCache.Key> = []
+    private var failureOrder: [PreviewImageCache.Key] = []
+
+    init(cache: PreviewImageCache = PreviewImageCache()) { self.cache = cache }
+
+    func image(for key: PreviewImageCache.Key,
+               load: @escaping @MainActor () async -> PreviewResult<UIImage>) async -> UIImage? {
+        guard !Task.isCancelled else { return nil }
+        if let image = cache.image(for: key) { return image }
+        if missingResources.contains(key) { return nil }
+        let waiterID = UUID()
+        let image: UIImage? = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else { continuation.resume(returning: nil); return }
+                if pending[key] != nil {
+                    pending[key]?.waiters[waiterID] = continuation
+                } else {
+                    let requestID = UUID()
+                    let generation = cache.generation(for: key)
+                    let task = Task { [weak self] in
+                        let result = await load()
+                        guard let self, pending[key]?.id == requestID else { return }
+                        let waiters = pending.removeValue(forKey: key)?.waiters.values
+                        if !Task.isCancelled {
+                            switch result {
+                            case .success(let image) where key.kind != .fullResolution:
+                                cache.store(image, for: key, generation: generation)
+                            case .failure(let failure) where failure.isMissingResource:
+                                missingResources.insert(key)
+                                failureOrder.append(key)
+                                while failureOrder.count > 96 { missingResources.remove(failureOrder.removeFirst()) }
+                            default: break
+                            }
+                        }
+                        waiters?.forEach { $0.resume(returning: Task.isCancelled ? nil : result.value) }
+                    }
+                    pending[key] = Pending(id: requestID, task: task, waiters: [waiterID: continuation])
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.cancel(waiter: waiterID, for: key) }
+        }
+        return Task.isCancelled ? nil : image
+    }
+
+    func hasResult(for key: PreviewImageCache.Key) -> Bool {
+        missingResources.contains(key) || cache.image(for: key) != nil
+    }
+
+    /// Releases rendered images without interrupting views waiting for a preview.
+    func removeCachedImages() {
+        cache.removeAll()
+    }
+
+    func invalidate(for identifiers: Set<String>? = nil) {
+        let keys = pending.keys.filter { identifiers?.contains($0.identifier) ?? true }
+        for key in keys {
+            if let request = pending.removeValue(forKey: key) {
+                request.task.cancel()
+                request.waiters.values.forEach { $0.resume(returning: nil) }
+            }
+        }
+        if let identifiers {
+            cache.remove(for: identifiers)
+            missingResources = missingResources.filter { !identifiers.contains($0.identifier) }
+            failureOrder.removeAll { identifiers.contains($0.identifier) }
+        } else {
+            cache.removeAll()
+            missingResources.removeAll()
+            failureOrder.removeAll()
+        }
+    }
+
+    private func cancel(waiter: UUID, for key: PreviewImageCache.Key) {
+        guard let continuation = pending[key]?.waiters.removeValue(forKey: waiter) else { return }
+        continuation.resume(returning: nil)
+        if pending[key]?.waiters.isEmpty == true { pending.removeValue(forKey: key)?.task.cancel() }
+    }
+}
+
+/// AVFoundation's legacy asset type has no Sendable conformance. The wrapped asset
+/// is read-only, is never exposed for mutation, and is used by the poster actor.
+struct VideoPosterAsset: @unchecked Sendable {
+    fileprivate let value: AVAsset
+    init(_ asset: AVAsset) { value = asset }
+}
+
+/// AVFoundation doesn't mark its generator Sendable. Serialize its control calls;
+/// completion callbacks transfer only an immutable CGImage or an error.
+private final class VideoPosterFrameRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private let generator: AVAssetImageGenerator
+    private var cancelled = false
+
+    init(asset: VideoPosterAsset, targetSize: CGSize) {
+        generator = AVAssetImageGenerator(asset: asset.value)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = targetSize.width > 0 && targetSize.height > 0
+            ? targetSize.bounded(to: 1600) : CGSize(width: 1600, height: 1600)
+    }
+
+    func image() async throws -> CGImage {
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                let started = lock.withLock {
+                    guard !cancelled else { return false }
+                    generator.generateCGImageAsynchronously(for: .zero) { image, _, error in
+                        if let image { continuation.resume(returning: image) }
+                        else { continuation.resume(throwing: error ?? CocoaError(.fileReadUnknown)) }
+                    }
+                    return true
+                }
+                if !started { continuation.resume(throwing: CancellationError()) }
+            }
+        } onCancel: { self.cancel() }
+    }
+
+    private func cancel() {
+        lock.withLock {
+            cancelled = true
+            generator.cancelAllCGImageGeneration()
+        }
+    }
+}
+
+/// Bounded frame extraction avoids decoding full-resolution videos on the main actor.
+actor VideoPosterGenerator {
+    private var active = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func image(for asset: VideoPosterAsset, targetSize: CGSize) async throws -> UIImage {
+        if active >= 2 { await withCheckedContinuation { waiters.append($0) } }
+        else { active += 1 }
+        defer {
+            if waiters.isEmpty { active -= 1 }
+            else { waiters.removeFirst().resume() }
+        }
+        try Task.checkCancellation()
+        let request = VideoPosterFrameRequest(asset: asset, targetSize: targetSize)
+        let frame = try await request.image()
+        try Task.checkCancellation()
+        return UIImage(cgImage: frame)
     }
 }
 
@@ -276,37 +470,79 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
     private let manager = PHCachingImageManager()
     private var cachedAssets: [String: PHAsset] = [:]
     private var resolvedAssets: [String: PHAsset] = [:]
-    private let renderedImages: PreviewImageCache
+    private let imageLoader: PreviewImageLoader
+    private let posterGenerator = VideoPosterGenerator()
     private var cachedConfiguration: PreviewImageConfiguration?
     private var cachedKind: PreviewRequestKind?
     private var memoryWarningObservation: PreviewMemoryWarningObservation?
 
     init(imageCache: PreviewImageCache = PreviewImageCache()) {
-        renderedImages = imageCache
+        imageLoader = PreviewImageLoader(cache: imageCache)
         memoryWarningObservation = PreviewMemoryWarningObservation { [weak self] in
-            Task { @MainActor in self?.invalidateCachedImages() }
+            Task { @MainActor in self?.releaseCachedImages() }
         }
     }
 
     func image(for identifier: String, targetSize: CGSize, kind: PreviewRequestKind) async -> UIImage? {
         guard !Task.isCancelled else { return nil }
         let configuration = PreviewImageConfiguration(kind: kind, targetSize: targetSize)
-        let key = kind == .fullResolution ? nil
-            : PreviewImageCache.Key(identifier: identifier, kind: kind, targetSize: configuration.targetSize)
-        if let key, let cached = renderedImages.image(for: key) { return cached }
-        let generation = renderedImages.generation
-        guard let asset = asset(for: identifier) else { return nil }
-        let image = await PreviewImageDelivery.image(kind: kind) { handler in
-            manager.requestImage(for: asset, targetSize: configuration.targetSize,
-                                 contentMode: configuration.contentMode, options: configuration.options,
-                                 resultHandler: handler)
+        let key = PreviewImageCache.Key(identifier: identifier, kind: kind,
+            targetSize: kind == .fullResolution ? .zero : configuration.targetSize)
+        return await imageLoader.image(for: key) { [self] in
+            guard let asset = asset(for: identifier) else {
+                let failure = PreviewFailure(error: NSError(domain: PHPhotosErrorDomain,
+                    code: PHPhotosError.Code.identifierNotFound.rawValue))
+                PreviewDiagnostics.record(failure, identifier: identifier, stage: "asset-lookup",
+                                          kind: kind, configuration: configuration)
+                return .failure(failure)
+            }
+            return await loadImage(for: asset, kind: kind, configuration: configuration)
+        }
+    }
+
+    private func loadImage(for asset: PHAsset, kind: PreviewRequestKind,
+                           configuration: PreviewImageConfiguration) async -> PreviewResult<UIImage> {
+        let result = await PreviewImageDelivery.result(acceptDegraded: kind == .thumbnail,
+            isNetworkAccessAllowed: configuration.options.isNetworkAccessAllowed) { handler in
+                manager.requestImage(for: asset, targetSize: configuration.targetSize,
+                                     contentMode: configuration.contentMode, options: configuration.options,
+                                     resultHandler: handler)
         } cancel: { [manager] requestID in
             manager.cancelImageRequest(requestID)
         }
-        if let image, let key {
-            renderedImages.store(image, for: key, generation: generation)
+        guard !Task.isCancelled else { return .cancelled }
+        guard case .failure(let failure) = result else { return result }
+        PreviewDiagnostics.record(failure, identifier: asset.localIdentifier, stage: "image",
+                                  kind: kind, configuration: configuration)
+        guard asset.mediaType == .video else { return result }
+
+        let options = PHVideoRequestOptions()
+        options.version = .current
+        options.deliveryMode = .automatic
+        options.isNetworkAccessAllowed = false
+        let video: PreviewResult<VideoPosterAsset> = await PreviewImageDelivery.result { handler in
+            manager.requestAVAsset(forVideo: asset, options: options) { asset, _, info in
+                handler(asset.map(VideoPosterAsset.init), info)
+            }
+        } cancel: { [manager] requestID in manager.cancelImageRequest(requestID) }
+        switch video {
+        case .cancelled: return .cancelled
+        case .failure(let failure):
+            PreviewDiagnostics.record(failure, identifier: asset.localIdentifier, stage: "poster-video",
+                                      kind: kind, configuration: configuration, networkAccessAllowed: false)
+            return .failure(failure)
+        case .success(let video):
+            do {
+                return .success(try await posterGenerator.image(for: video, targetSize: configuration.targetSize))
+            } catch is CancellationError { return .cancelled }
+            catch {
+                guard !Task.isCancelled else { return .cancelled }
+                let failure = PreviewFailure(error: error)
+                PreviewDiagnostics.record(failure, identifier: asset.localIdentifier, stage: "poster-frame",
+                                          kind: kind, configuration: configuration, networkAccessAllowed: false)
+                return .failure(failure)
+            }
         }
-        return image
     }
 
     func livePhoto(for identifier: String, targetSize: CGSize) async -> PHLivePhoto? {
@@ -314,11 +550,16 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
         let options = PHLivePhotoRequestOptions()
         options.deliveryMode = .highQualityFormat
         options.isNetworkAccessAllowed = true
-        return await PreviewImageDelivery.finalResult { handler in
+        let result = await PreviewImageDelivery.result(isNetworkAccessAllowed: true) { handler in
             manager.requestLivePhoto(for: asset, targetSize: targetSize, contentMode: .aspectFit, options: options, resultHandler: handler)
         } cancel: { [manager] requestID in
             manager.cancelImageRequest(requestID)
         }
+        if case .failure(let failure) = result {
+            PreviewDiagnostics.record(failure, identifier: identifier, stage: "live-photo", kind: .active,
+                                      configuration: PreviewImageConfiguration(kind: .active, targetSize: targetSize))
+        }
+        return result.value
     }
 
     func playerItem(for identifier: String) async -> AVPlayerItem? {
@@ -326,11 +567,16 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
         let options = PHVideoRequestOptions()
         options.deliveryMode = .automatic
         options.isNetworkAccessAllowed = true
-        return await PreviewImageDelivery.finalResult { handler in
+        let result = await PreviewImageDelivery.result(isNetworkAccessAllowed: true) { handler in
             manager.requestPlayerItem(forVideo: asset, options: options, resultHandler: handler)
         } cancel: { [manager] requestID in
             manager.cancelImageRequest(requestID)
         }
+        if case .failure(let failure) = result {
+            PreviewDiagnostics.record(failure, identifier: identifier, stage: "player-item", kind: .active,
+                                      configuration: PreviewImageConfiguration(kind: .active, targetSize: .zero))
+        }
+        return result.value
     }
 
     func shareableVideoURL(for identifier: String) async throws -> URL? {
@@ -356,6 +602,7 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
     }
 
     func startCaching(identifiers: [String], targetSize: CGSize, kind: PreviewRequestKind) {
+        guard kind != .fullResolution else { stopCachingAll(); return }
         let configuration = PreviewImageConfiguration(kind: kind, targetSize: targetSize)
         if let previous = cachedConfiguration,
            previous.targetSize != configuration.targetSize || cachedKind != kind {
@@ -378,15 +625,20 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
             removed.keys.forEach { cachedAssets.removeValue(forKey: $0) }
         }
 
-        let missing = identifiers.filter { cachedAssets[$0] == nil }
+        let missing = identifiers.filter {
+            cachedAssets[$0] == nil && !imageLoader.hasResult(for: PreviewImageCache.Key(
+                identifier: $0, kind: kind, targetSize: configuration.targetSize))
+        }
         guard !missing.isEmpty else { return }
         let result = PHAsset.fetchAssets(withLocalIdentifiers: missing, options: nil)
         var added: [PHAsset] = []
         result.enumerateObjects { asset, _, _ in
             self.cachedAssets[asset.localIdentifier] = asset
             self.rememberResolved(asset)
-            added.append(asset)
+            // Upcoming cards load their video posters through the fallback-aware loader.
+            if asset.mediaType != .video { added.append(asset) }
         }
+        guard !added.isEmpty else { return }
         manager.startCachingImages(
             for: added, targetSize: configuration.targetSize,
             contentMode: configuration.contentMode, options: configuration.options
@@ -400,9 +652,15 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
         cachedKind = nil
     }
 
+    private func releaseCachedImages() {
+        stopCachingAll()
+        imageLoader.removeCachedImages()
+        resolvedAssets.removeAll()
+    }
+
     func invalidateCachedImages() {
         stopCachingAll()
-        renderedImages.removeAll()
+        imageLoader.invalidate()
         resolvedAssets.removeAll()
     }
 
@@ -415,7 +673,7 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
             }
             resolvedAssets.removeValue(forKey: id)
         }
-        renderedImages.remove(for: identifiers)
+        imageLoader.invalidate(for: identifiers)
     }
 
     private func asset(for identifier: String) -> PHAsset? {

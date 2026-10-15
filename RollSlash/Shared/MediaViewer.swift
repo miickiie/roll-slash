@@ -188,9 +188,10 @@ struct MediaViewer: View {
         ContentUnavailableView {
             Label("Preview unavailable", systemImage: "icloud.slash")
         } description: {
-            Text("The item may still be in iCloud.")
+            Text("Photos could not load this preview.")
         } actions: {
-            Button("Retry") { retryCount += 1 }
+            Button("Retry") { retryPreview() }
+                .accessibilityIdentifier("retry-media-preview")
         }
         .foregroundStyle(.white)
     }
@@ -209,7 +210,7 @@ struct MediaViewer: View {
                 if isLoadingFullResolution {
                     ProgressView("Loading full resolution…").font(.caption).tint(.white)
                 } else if fullResolutionFailed {
-                    Button("Retry full resolution") { retryCount += 1 }
+                    Button("Retry full resolution") { retryPreview() }
                         .font(.caption)
                 }
             }
@@ -275,6 +276,11 @@ struct MediaViewer: View {
         .padding(.horizontal, 18)
         .padding(.top, 12)
         .padding(.bottom, 8)
+    }
+
+    private func retryPreview() {
+        appModel.previewProvider.invalidateCachedImages(for: [asset.id])
+        retryCount += 1
     }
 
     private func load() async {

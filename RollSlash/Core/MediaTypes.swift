@@ -59,6 +59,11 @@ struct MediaAnalysisCacheEntry: Sendable {
     let result: MediaAnalysisResult
 }
 
+struct MediaAnalysisCacheSnapshot: Sendable {
+    let results: [String: MediaAnalysisResult]
+    let missingAssetIDs: Set<String>
+}
+
 struct SimilarPhotoCluster: Identifiable, Hashable, Codable, Sendable {
     let id: String
     let assetIDs: [String]

@@ -41,60 +41,93 @@ struct ViewerPreviewTests {
         for kind in [PreviewRequestKind.active, .comparison, .fullResolution] {
             let degraded = UIImage()
             let final = UIImage()
-            let result = await PreviewImageDelivery.image(kind: kind) { handler in
+            let result = await PreviewImageDelivery.result(acceptDegraded: kind == .thumbnail) { handler in
                 handler(degraded, [PHImageResultIsDegradedKey: true])
                 handler(final, [PHImageResultIsDegradedKey: false])
                 handler(degraded, nil)
                 return 1
             } cancel: { _ in }
-            #expect(result === final)
+            #expect(result.value === final)
         }
     }
 
     @Test func degradedLiveResultsWaitForTheFinalValue() async {
-        let result = await PreviewImageDelivery.finalResult { handler in
+        let result = await PreviewImageDelivery.result { handler in
             handler("degraded", [PHImageResultIsDegradedKey: true])
             handler("final", [PHImageResultIsDegradedKey: false])
             handler("late", nil)
             return 1
         } cancel: { _ in }
-        #expect(result == "final")
+        #expect(result.value == "final")
     }
 
     @Test func failedLiveResultFinishesWithoutWaiting() async {
-        let result = await PreviewImageDelivery.finalResult { handler in
+        let result = await PreviewImageDelivery.result { handler in
             handler("nope", [PHImageErrorKey: NSError(domain: "test", code: 1), PHImageResultIsDegradedKey: true])
             handler("late", nil)
             return 1
         } cancel: { _ in }
-        #expect(result == nil)
+        #expect(result.value == nil)
     }
 
     @Test func failedOrUnavailableOriginalFinishesWithoutAnImage() async {
         let cases: [[AnyHashable: Any]?] = [nil, [PHImageCancelledKey: true],
             [PHImageErrorKey: NSError(domain: "test", code: 1), PHImageResultIsDegradedKey: true]]
         for info in cases {
-            let result = await PreviewImageDelivery.image(kind: .fullResolution) { handler in
+            let result: PreviewResult<UIImage> = await PreviewImageDelivery.result { handler in
                 handler(nil, info)
                 return 2
             } cancel: { _ in }
-            #expect(result == nil)
+            #expect(result.value == nil)
         }
     }
 
     @Test func cancellationStopsPhotoKitAndRejectsLateImage() async throws {
         let request = PendingPreviewRequest()
         let task = Task {
-            await PreviewImageDelivery.image(kind: .fullResolution, start: request.start, cancel: request.cancel)
+            await PreviewImageDelivery.result(start: request.start, cancel: request.cancel)
         }
         for _ in 0..<100 where request.handler == nil { await Task.yield() }
         _ = try #require(request.handler)
         task.cancel()
-        #expect(await task.value == nil)
+        #expect(await task.value.value == nil)
         for _ in 0..<100 where !request.cancelled { await Task.yield() }
         #expect(request.cancelled)
         request.handler?(UIImage(), nil)
-        #expect(await task.value == nil)
+        #expect(await task.value.value == nil)
+    }
+
+    @Test("Photos failures retain their domain, code and cloud status")
+    func structuredPhotosFailure() async {
+        let result: PreviewResult<UIImage> = await PreviewImageDelivery.result { handler in
+            handler(nil, [PHImageErrorKey: NSError(domain: PHPhotosErrorDomain,
+                code: PHPhotosError.Code.missingResource.rawValue)])
+            return 1
+        } cancel: { _ in }
+        guard case .failure(let failure) = result else { Issue.record("Expected a resource failure"); return }
+        #expect(failure.domain == PHPhotosErrorDomain)
+        #expect(failure.code == 3303)
+        #expect(failure.isMissingResource)
+        #expect(!failure.isInCloud)
+    }
+
+    @Test("cloud-only callbacks finish local requests but wait for an explicit download")
+    func cloudDeliveryPolicy() async {
+        let image = UIImage()
+        for allowsDownload in [false, true] {
+            let result: PreviewResult<UIImage> = await PreviewImageDelivery.result(
+                isNetworkAccessAllowed: allowsDownload) { handler in
+                    handler(nil, [PHImageResultIsDegradedKey: true, PHImageResultIsInCloudKey: true])
+                    handler(image, nil)
+                    return 1
+            } cancel: { _ in }
+            if allowsDownload { #expect(result.value === image) }
+            else {
+                guard case .failure(let failure) = result else { Issue.record("Expected a cloud-only failure"); continue }
+                #expect(failure.isInCloud)
+                #expect(!failure.isMissingResource)
+            }
+        }
     }
 
     @Test func frozenNavigationIncludesReadOnlyContextButNeverAnotherSet() {
@@ -273,9 +306,9 @@ struct PreviewImageCacheTests {
     func leastRecentlyUsedEviction() {
         let cache = PreviewImageCache(countLimit: 2)
         let image = makeImage(size: 10)
-        for id in ["a", "b"] { cache.store(image, for: key(id), generation: cache.generation) }
+        for id in ["a", "b"] { cache.store(image, for: key(id), generation: cache.generation(for: key(id))) }
         #expect(cache.image(for: key("a")) === image)
-        cache.store(image, for: key("c"), generation: cache.generation)
+        cache.store(image, for: key("c"), generation: cache.generation(for: key("c")))
         #expect(cache.image(for: key("b")) == nil)
         #expect(cache.image(for: key("a")) === image)
         #expect(cache.image(for: key("c")) === image)
@@ -287,14 +320,14 @@ struct PreviewImageCacheTests {
         let pixels = try #require(image.cgImage)
         let cost = pixels.bytesPerRow * pixels.height
         let cache = PreviewImageCache(byteLimit: cost * 2)
-        for id in ["a", "b", "c"] { cache.store(image, for: key(id), generation: cache.generation) }
+        for id in ["a", "b", "c"] { cache.store(image, for: key(id), generation: cache.generation(for: key(id))) }
         #expect(cache.byteCount == cost * 2)
         #expect(cache.image(for: key("a")) == nil)
-        cache.store(makeImage(size: 100), for: key("oversized"), generation: cache.generation)
+        cache.store(makeImage(size: 100), for: key("oversized"), generation: cache.generation(for: key("oversized")))
         #expect(cache.image(for: key("oversized")) == nil)
         #expect(cache.image(for: key("b")) === image)
         #expect(cache.image(for: key("c")) === image)
-        cache.store(image, for: key("b"), generation: cache.generation)
+        cache.store(image, for: key("b"), generation: cache.generation(for: key("b")))
         #expect(cache.byteCount == cost * 2)
     }
 
@@ -302,13 +335,13 @@ struct PreviewImageCacheTests {
     func staleRequestCannotRepopulateCache() {
         let cache = PreviewImageCache()
         let image = makeImage(size: 10)
-        let oldGeneration = cache.generation
+        let oldGeneration = cache.generation(for: key("a"))
         cache.store(image, for: key("a"), generation: oldGeneration)
         cache.removeAll()
         cache.store(image, for: key("a"), generation: oldGeneration)
         #expect(cache.byteCount == 0)
         #expect(cache.image(for: key("a")) == nil)
-        cache.store(image, for: key("a"), generation: cache.generation)
+        cache.store(image, for: key("a"), generation: cache.generation(for: key("a")))
         #expect(cache.image(for: key("a")) === image)
     }
 
@@ -318,7 +351,7 @@ struct PreviewImageCacheTests {
         let image = makeImage(size: 10)
         let size = CGSize(width: 900, height: 1200)
         let request = PreviewImageCache.Key(identifier: "fixture", kind: .active, targetSize: size)
-        cache.store(image, for: request, generation: cache.generation)
+        cache.store(image, for: request, generation: cache.generation(for: request))
         let provider = PhotoKitMediaPreviewProvider(imageCache: cache)
         #expect(await provider.image(for: "fixture", targetSize: size, kind: .active) === image)
         provider.stopCachingAll()
@@ -336,14 +369,29 @@ struct PreviewImageCacheTests {
         let size = CGSize(width: 100, height: 100)
         let keyA = PreviewImageCache.Key(identifier: "a", kind: .active, targetSize: size)
         let keyB = PreviewImageCache.Key(identifier: "b", kind: .active, targetSize: size)
-        cache.store(imageA, for: keyA, generation: cache.generation)
-        cache.store(imageB, for: keyB, generation: cache.generation)
+        cache.store(imageA, for: keyA, generation: cache.generation(for: keyA))
+        cache.store(imageB, for: keyB, generation: cache.generation(for: keyB))
 
         let provider = PhotoKitMediaPreviewProvider(imageCache: cache)
         provider.invalidateCachedImages(for: ["a"])
 
         #expect(cache.image(for: keyA) == nil)
         #expect(cache.image(for: keyB) === imageB)
+    }
+
+    @Test("selective invalidation rejects affected requests and accepts unrelated requests already in flight")
+    func selectiveInvalidationPreservesUnrelatedRequests() {
+        let cache = PreviewImageCache()
+        let image = makeImage(size: 10)
+        let a = key("a"), b = key("b")
+        let generationA = cache.generation(for: a), generationB = cache.generation(for: b)
+        cache.remove(for: ["a"])
+        cache.store(image, for: a, generation: generationA)
+        cache.store(image, for: b, generation: generationB)
+        #expect(cache.image(for: a) == nil)
+        #expect(cache.image(for: b) === image)
+        cache.store(image, for: a, generation: cache.generation(for: a))
+        #expect(cache.image(for: a) === image)
     }
 
     private func key(_ id: String) -> PreviewImageCache.Key {
@@ -357,6 +405,220 @@ struct PreviewImageCacheTests {
             UIColor.orange.setFill()
             context.fill(CGRect(x: 0, y: 0, width: size, height: size))
         }
+    }
+}
+
+@MainActor
+@Suite("Shared preview requests")
+struct PreviewImageLoaderTests {
+    @Test("memory cleanup preserves shared preview requests without refilling the cleared cache",
+          arguments: [PreviewRequestKind.thumbnail, .active, .comparison, .fullResolution])
+    func memoryCleanupPreservesRequests(kind: PreviewRequestKind) async throws {
+        let cache = PreviewImageCache()
+        let loader = PreviewImageLoader(cache: cache)
+        let cachedKey = key("cached")
+        cache.store(makeImage(), for: cachedKey, generation: cache.generation(for: cachedKey))
+        #expect(cache.byteCount > 0)
+
+        let request = PendingImageLoad()
+        let pendingKey = key("pending", kind: kind)
+        let first = Task { await loader.image(for: pendingKey, load: request.load) }
+        try #require(await waitUntil { request.calls == 1 })
+
+        loader.removeCachedImages()
+        #expect(cache.byteCount == 0)
+        #expect(cache.image(for: cachedKey) == nil)
+
+        var secondStarted = false
+        let second = Task {
+            secondStarted = true
+            return await loader.image(for: pendingKey, load: request.load)
+        }
+        try #require(await waitUntil { secondStarted })
+        #expect(request.calls == 1)
+        let image = makeImage()
+        for _ in 0..<request.calls { request.finish(at: 0, with: .success(image)) }
+        #expect(await first.value === image)
+        #expect(await second.value === image)
+        #expect(cache.image(for: pendingKey) == nil)
+
+        let freshImage = makeImage()
+        var freshLoads = 0
+        #expect(await loader.image(for: pendingKey) {
+            freshLoads += 1
+            return .success(freshImage)
+        } === freshImage)
+        #expect(freshLoads == 1)
+        if kind != .fullResolution { #expect(cache.image(for: pendingKey) === freshImage) }
+    }
+
+    @Test("cancelling one view preserves another view's shared image request")
+    func sharedRequestCancellation() async throws {
+        let loader = PreviewImageLoader()
+        let request = PendingImageLoad()
+        let key = key("a")
+        let first = Task { await loader.image(for: key, load: request.load) }
+        try #require(await waitUntil { request.calls == 1 })
+        var secondStarted = false
+        let second = Task {
+            secondStarted = true
+            return await loader.image(for: key, load: request.load)
+        }
+        try #require(await waitUntil { secondStarted })
+        first.cancel()
+        #expect(await first.value == nil)
+        #expect(request.calls == 1)
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 10, height: 10)).image { $0.fill(CGRect(x: 0, y: 0, width: 10, height: 10)) }
+        request.finish(at: 0, with: .success(image))
+        #expect(await second.value === image)
+        #expect(await loader.image(for: key, load: request.load) === image)
+        #expect(request.calls == 1)
+    }
+
+    @Test("library changes cancel only affected requests and reject their late results")
+    func invalidateDuringLoad() async throws {
+        let loader = PreviewImageLoader()
+        let request = PendingImageLoad()
+        let old = Task { await loader.image(for: key("a"), load: request.load) }
+        try #require(await waitUntil { request.calls == 1 })
+        let unaffected = Task { await loader.image(for: key("b"), load: request.load) }
+        try #require(await waitUntil { request.calls == 2 })
+        loader.invalidate(for: ["a"])
+        #expect(await old.value == nil)
+        let replacement = Task { await loader.image(for: key("a"), load: request.load) }
+        try #require(await waitUntil { request.calls == 3 })
+        let stale = makeImage(), current = makeImage(), other = makeImage()
+        request.finish(at: 0, with: .success(stale))
+        request.finish(at: 0, with: .success(other))
+        request.finish(at: 0, with: .success(current))
+        #expect(await unaffected.value === other)
+        #expect(await replacement.value === current)
+        #expect(await loader.image(for: key("a"), load: request.load) === current)
+        #expect(request.calls == 3)
+    }
+
+    @Test("a missing-resource failure is reused until explicit invalidation")
+    func missingResourceRetry() async {
+        let loader = PreviewImageLoader()
+        let failure = PreviewFailure(error: NSError(domain: PHPhotosErrorDomain,
+            code: PHPhotosError.Code.missingResource.rawValue))
+        var calls = 0
+        for _ in 0..<2 {
+            #expect(await loader.image(for: key("a")) { calls += 1; return .failure(failure) } == nil)
+        }
+        #expect(calls == 1)
+        // Local-only thumbnail failures must not block a user-initiated preview/download.
+        #expect(await loader.image(for: key("a", kind: .active)) { calls += 1; return .success(UIImage()) } != nil)
+        #expect(calls == 2)
+        loader.invalidate(for: ["a"])
+        #expect(await loader.image(for: key("a")) { calls += 1; return .success(UIImage()) } != nil)
+        #expect(calls == 3)
+    }
+
+    @Test("cloud, transient and cancelled results do not poison the image cache")
+    func retryableFailures() async {
+        let loader = PreviewImageLoader()
+        let outcomes: [PreviewResult<UIImage>] = [
+            .failure(PreviewFailure(error: URLError(.timedOut))),
+            .failure(PreviewFailure(error: NSError(domain: PHPhotosErrorDomain,
+                code: PHPhotosError.Code.missingResource.rawValue), isInCloud: true)), .cancelled
+        ]
+        for (index, outcome) in outcomes.enumerated() {
+            var calls = 0
+            let request = key(String(index))
+            for _ in 0..<2 {
+                #expect(await loader.image(for: request) { calls += 1; return outcome } == nil)
+            }
+            #expect(calls == 2)
+        }
+    }
+
+    private func key(_ id: String, kind: PreviewRequestKind = .thumbnail) -> PreviewImageCache.Key {
+        PreviewImageCache.Key(identifier: id, kind: kind, targetSize: CGSize(width: 100, height: 100))
+    }
+
+    private func makeImage() -> UIImage {
+        UIGraphicsImageRenderer(size: CGSize(width: 10, height: 10)).image {
+            $0.fill(CGRect(x: 0, y: 0, width: 10, height: 10))
+        }
+    }
+
+    private func waitUntil(_ condition: () -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !condition(), ContinuousClock.now < deadline { await Task.yield() }
+        return condition()
+    }
+}
+
+@MainActor
+private final class PendingImageLoad {
+    private(set) var calls = 0
+    private var pending: [CheckedContinuation<PreviewResult<UIImage>, Never>] = []
+
+    func load() async -> PreviewResult<UIImage> {
+        calls += 1
+        return await withCheckedContinuation { pending.append($0) }
+    }
+
+    func finish(at index: Int, with result: PreviewResult<UIImage>) {
+        pending.remove(at: index).resume(returning: result)
+    }
+}
+
+@MainActor
+@Suite("Generated video posters")
+struct VideoPosterGeneratorTests {
+    @Test("a local video generates a bounded poster with its display rotation")
+    func boundedRotatedPoster() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: 64, AVVideoHeightKey: 32
+        ])
+        input.transform = CGAffineTransform(rotationAngle: .pi / 2)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input,
+            sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: 64, kCVPixelBufferHeightKey as String: 32])
+        writer.add(input)
+        try #require(writer.startWriting())
+        defer { if writer.status == .writing { writer.cancelWriting() } }
+        writer.startSession(atSourceTime: .zero)
+        var buffer: CVPixelBuffer?
+        try #require(CVPixelBufferCreate(kCFAllocatorDefault, 64, 32, kCVPixelFormatType_32BGRA, nil, &buffer) == kCVReturnSuccess)
+        let pixels = try #require(buffer)
+        CVPixelBufferLockBaseAddress(pixels, [])
+        if let base = CVPixelBufferGetBaseAddress(pixels) {
+            base.initializeMemory(as: UInt8.self, repeating: 127, count: CVPixelBufferGetBytesPerRow(pixels) * 32)
+        }
+        CVPixelBufferUnlockBaseAddress(pixels, [])
+        for frame in 0..<2 {
+            let deadline = ContinuousClock.now + .seconds(5)
+            while !input.isReadyForMoreMediaData, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            try #require(input.isReadyForMoreMediaData)
+            try #require(adaptor.append(pixels, withPresentationTime: CMTime(value: Int64(frame), timescale: 30)))
+        }
+        writer.endSession(atSourceTime: CMTime(value: 2, timescale: 30))
+        input.markAsFinished()
+        await writer.finishWriting()
+        try #require(writer.status == .completed)
+
+        let poster = try await VideoPosterGenerator().image(for: VideoPosterAsset(AVURLAsset(url: url)),
+                                                           targetSize: CGSize(width: 16, height: 16))
+        #expect(max(poster.size.width, poster.size.height) <= 16)
+        #expect(poster.size.height > poster.size.width)
+    }
+
+    @Test("a cancelled poster request exits before attempting to decode")
+    func cancelledPoster() async throws {
+        let generator = VideoPosterGenerator()
+        let task = Task { try await generator.image(for: VideoPosterAsset(AVURLAsset(url: URL(fileURLWithPath: "/missing.mov"))),
+                                                     targetSize: CGSize(width: 100, height: 100)) }
+        task.cancel()
+        do { _ = try await task.value; Issue.record("A cancelled poster request must throw") }
+        catch is CancellationError {}
     }
 }
 
@@ -507,6 +769,28 @@ struct PreviewLifecycleTests {
         #expect(provider.images.filter { $0 == "c" }.count == 1)
     }
 
+    @Test("an active video requests playback before its delayed poster finishes")
+    func videoPlaybackDoesNotWaitForPoster() async throws {
+        let provider = DelayedSwipePreviewProvider()
+        let model = try await makeSwipeModel(assets: [asset("a", modified: 1, kind: .video)], provider: provider)
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: CleanupView().environment(model))
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            provider.finishAll()
+            previousKeyWindow?.makeKeyAndVisible()
+        }
+        let requestedMotion = try await waitUntil { provider.videoRequests.contains("a") }
+        #expect(requestedMotion)
+        #expect(provider.images == ["a"])
+        #expect(provider.videoRequests == ["a"])
+        #expect(provider.liveRequests.isEmpty)
+    }
+
     @Test("the swipe buffer stops at comparison sets and respects its size limit")
     func swipeBufferBoundaries() async throws {
         let provider = RecordingPreviewProvider()
@@ -655,6 +939,7 @@ private struct PreviewTestAnalysis: MediaAnalysisClient {
     private(set) var videoRequests: [String] = []
     private(set) var liveRequests: [String] = []
     private var pending: [String: [CheckedContinuation<UIImage?, Never>]] = [:]
+    private var pendingPlayers: [CheckedContinuation<AVPlayerItem?, Never>] = []
 
     func image(for identifier: String, targetSize: CGSize, kind: PreviewRequestKind) async -> UIImage? {
         images.append(identifier)
@@ -673,6 +958,9 @@ private struct PreviewTestAnalysis: MediaAnalysisClient {
         let requests = pending.values.flatMap { $0 }
         pending.removeAll()
         requests.forEach { $0.resume(returning: nil) }
+        let players = pendingPlayers
+        pendingPlayers.removeAll()
+        players.forEach { $0.resume(returning: nil) }
     }
 
     func livePhoto(for identifier: String, targetSize: CGSize) async -> PHLivePhoto? {
@@ -682,7 +970,7 @@ private struct PreviewTestAnalysis: MediaAnalysisClient {
 
     func playerItem(for identifier: String) async -> AVPlayerItem? {
         videoRequests.append(identifier)
-        return nil
+        return await withCheckedContinuation { pendingPlayers.append($0) }
     }
 
     func shareableVideoURL(for identifier: String) async throws -> URL? { nil }

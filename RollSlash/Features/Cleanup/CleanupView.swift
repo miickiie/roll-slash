@@ -37,31 +37,14 @@ struct CleanupView: View {
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 10)
-            if let previewAsset, let currentPreview = appModel.assetIndex[previewAsset.id] {
-                GeometryReader { geometry in
-                    let viewport = CGSize(
-                        width: geometry.size.width,
-                        height: geometry.size.height + geometry.safeAreaInsets.top + geometry.safeAreaInsets.bottom
-                    )
-                    MediaViewer(
-                        asset: currentPreview,
-                        initialImage: currentPreview.modificationDate == previewAsset.modificationDate ? previewImage : nil,
-                        onDismissSwipe: { translation in
-                            dismissPreview(toward: translation, viewport: viewport)
-                        },
-                        onClose: {
-                            dismissPreview(toward: CGSize(width: 0, height: 100), viewport: viewport)
-                        },
-                        dismissalOffset: previewExitOffset,
-                        dismissalOpacity: previewOpacity
-                    )
-                    .frame(width: geometry.size.width, height: geometry.size.height)
-                }
-                .zIndex(1)
-            }
         }
         .foregroundStyle(.white)
         .sensoryFeedback(trigger: hapticPulse) { _, pulse in pulse.feedback }
+        .fullScreenCover(item: $previewAsset, onDismiss: finishPreviewDismissal) { asset in
+            fullscreenPreview(asset)
+                .presentationBackground(.clear)
+                .interactiveDismissDisabled()
+        }
         .alert("Roll Slash", isPresented: Binding(
             get: { appModel.errorMessage != nil },
             set: { if !$0 { appModel.errorMessage = nil } }
@@ -78,6 +61,26 @@ struct CleanupView: View {
         }
         .onChange(of: previewAsset.map { appModel.assetIndex[$0.id] == nil }) { _, missing in
             if missing == true { finishPreviewDismissal() }
+        }
+    }
+
+    private func fullscreenPreview(_ asset: PhotoAssetDescriptor) -> some View {
+        GeometryReader { geometry in
+            if let currentPreview = appModel.assetIndex[asset.id] {
+                let viewport = CGSize(
+                    width: geometry.size.width,
+                    height: geometry.size.height + geometry.safeAreaInsets.top + geometry.safeAreaInsets.bottom
+                )
+                MediaViewer(
+                    asset: currentPreview,
+                    initialImage: currentPreview.modificationDate == asset.modificationDate ? previewImage : nil,
+                    onDismissSwipe: { translation in dismissPreview(toward: translation, viewport: viewport) },
+                    onClose: { dismissPreview(toward: CGSize(width: 0, height: 100), viewport: viewport) },
+                    dismissalOffset: previewExitOffset,
+                    dismissalOpacity: previewOpacity
+                )
+                .frame(width: geometry.size.width, height: geometry.size.height)
+            }
         }
     }
 
@@ -116,11 +119,12 @@ struct CleanupView: View {
     }
 
     private func finishPreviewDismissal() {
-        previewAsset = nil
-        previewImage = nil
-        previewExitOffset = .zero
-        previewOpacity = 1
-        isPreviewDismissing = false
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            previewAsset = nil
+            previewImage = nil
+        }
     }
 
     private var header: some View {
@@ -538,17 +542,28 @@ struct MediaCardView: View {
 
     @State private var image: UIImage?
     @State private var livePhoto: PHLivePhoto?
-    @State private var player: AVPlayer?
+    @State private var playback = VideoPreviewPlayback()
     @State private var isLivePlaying = false
     @State private var isMuted = true
-    @State private var failed = false
+    @State private var imageFailed = false
+    @State private var motionFailed = false
     @State private var isVisible = false
     @State private var retryCount = 0
-    @State private var loadedRequest: PreviewImageRequest?
+    @State private var loadedMotionRequest: PreviewImageRequest?
 
     private struct MotionRequest: Hashable {
-        let preview: PreviewImageRequest?
+        let preview: PreviewImageRequest
         let isActive: Bool
+    }
+
+    private var player: AVPlayer? { playback.player }
+
+    private var failed: Bool {
+        switch asset.mediaKind {
+        case .photo: imageFailed
+        case .livePhoto: imageFailed && motionFailed
+        case .video: motionFailed
+        }
     }
 
     var body: some View {
@@ -558,13 +573,17 @@ struct MediaCardView: View {
             ZStack {
                 Color.black
                 media
-                if isActive && failed {
+                if isActive && (failed || playback.hasFailed) {
                     ContentUnavailableView {
                         Label("Preview unavailable", systemImage: "icloud.slash")
                     } description: {
-                        Text("The item may still be in iCloud.")
+                        Text("Photos could not load this preview.")
                     } actions: {
-                        Button("Retry") { retryCount += 1 }
+                        Button("Retry") {
+                            appModel.previewProvider.invalidateCachedImages(for: [asset.id])
+                            retryCount += 1
+                        }
+                            .accessibilityIdentifier("retry-card-preview")
                     }
                     .foregroundStyle(.white)
                 }
@@ -603,8 +622,8 @@ struct MediaCardView: View {
             }
             .clipShape(.rect(cornerRadius: 30))
             .task(id: request) { await loadImage(request: request) }
-            .task(id: MotionRequest(preview: loadedRequest, isActive: isActive && !isPreviewOpen)) {
-                await loadMotion()
+            .task(id: MotionRequest(preview: request, isActive: isActive && !isPreviewOpen)) {
+                await loadMotion(request: request)
             }
             .onAppear {
                 isVisible = true
@@ -612,7 +631,7 @@ struct MediaCardView: View {
             }
             .onDisappear {
                 isVisible = false
-                player?.pause()
+                playback.reset()
                 isLivePlaying = false
             }
             .onChange(of: isPreviewOpen) { _, _ in updatePlayback() }
@@ -647,6 +666,8 @@ struct MediaCardView: View {
                     .onAppear { updatePlayback() }
             } else if let image {
                 Image(uiImage: image).resizable().scaledToFit()
+            } else if !isActive {
+                Image(systemName: "video.fill").font(.largeTitle).foregroundStyle(.secondary)
             } else {
                 loading
             }
@@ -708,24 +729,25 @@ struct MediaCardView: View {
     }
 
     private func loadImage(request: PreviewImageRequest) async {
-        player?.pause()
-        player = nil
         image = nil
-        livePhoto = nil
-        loadedRequest = nil
-        isLivePlaying = false
-        failed = false
+        imageFailed = false
         let loadedImage = await appModel.previewProvider.image(
             for: asset.id, targetSize: request.targetSize, kind: .active
         )
         guard !Task.isCancelled else { return }
         image = loadedImage
-        failed = asset.mediaKind == .photo && loadedImage == nil
-        loadedRequest = request
+        imageFailed = loadedImage == nil
     }
 
-    private func loadMotion() async {
-        guard isActive, !isPreviewOpen, let request = loadedRequest else {
+    private func loadMotion(request: PreviewImageRequest) async {
+        if loadedMotionRequest != request {
+            playback.reset()
+            livePhoto = nil
+            isLivePlaying = false
+            motionFailed = false
+            loadedMotionRequest = request
+        }
+        guard isActive, !isPreviewOpen else {
             updatePlayback()
             return
         }
@@ -735,7 +757,7 @@ struct MediaCardView: View {
         case .livePhoto:
             if livePhoto != nil { return }
             let motion = await appModel.previewProvider.livePhoto(for: asset.id, targetSize: request.targetSize)
-            guard !Task.isCancelled, request == loadedRequest else { return }
+            guard !Task.isCancelled, request == loadedMotionRequest else { return }
             livePhoto = motion
         case .video:
             if player != nil {
@@ -743,15 +765,11 @@ struct MediaCardView: View {
                 return
             }
             let item = await appModel.previewProvider.playerItem(for: asset.id)
-            guard !Task.isCancelled, request == loadedRequest else { return }
-            if let item {
-                let player = AVPlayer(playerItem: item)
-                player.isMuted = isMuted
-                self.player = player
-                updatePlayback()
-            }
+            guard !Task.isCancelled, request == loadedMotionRequest else { return }
+            playback.load(item, isMuted: isMuted)
+            updatePlayback()
         }
-        failed = image == nil && livePhoto == nil && player == nil
+        motionFailed = livePhoto == nil && player == nil
     }
 
     private func updatePlayback() {
