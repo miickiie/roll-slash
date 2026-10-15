@@ -45,10 +45,13 @@ enum SimilarPhotoDetection {
         var prints: [String: VNFeaturePrintObservation] = [:]
         var members: [String: [String]] = [:]
         var representatives: [String] = []
-        for asset in assets.sorted(by: {
+        let candidates = assets.filter {
+            $0.mediaKind != .video && results[$0.id]?.featurePrint != nil && results[$0.id]?.perceptualHash != nil
+        }.sorted(by: {
             let lhs = $0.creationDate ?? .distantPast, rhs = $1.creationDate ?? .distantPast
             return lhs == rhs ? $0.id < $1.id : lhs > rhs
-        }) where asset.mediaKind != .video {
+        })
+        for asset in candidates {
             guard !Task.isCancelled, let result = results[asset.id], let data = result.featurePrint,
                   let hash = result.perceptualHash,
                   let decoded = decode(asset.id, data) else { continue }

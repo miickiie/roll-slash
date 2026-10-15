@@ -220,6 +220,29 @@ struct TypeGroupingTests {
         #expect(harness.model.similarClusters.isEmpty)
     }
 
+    @Test("returning to Type retries a photo whose late result was discarded after cancellation")
+    func canceledResultRemainsRetryable() async throws {
+        let service = SuspendedTypeAnalysis()
+        let harness = try makeHarness(analysis: service)
+        harness.library.assets = [makeAsset("a")]
+        await harness.model.start()
+        harness.model.grouping = .type
+        await service.waitForRequest()
+
+        harness.model.grouping = .month
+        await service.release()
+        for _ in 0..<20 { await Task.yield() }
+        #expect(harness.model.analysisResults.isEmpty)
+
+        harness.model.grouping = .type
+        try #require(harness.model.isAnalyzingTypes)
+        await service.waitForRequest()
+        await service.release()
+        try await awaitAnalysis(harness.model)
+        #expect(harness.model.analysisResults["a"]?.isComplete == true)
+        #expect(harness.model.typeAnalysisUnavailableCount == 0)
+    }
+
     @Test("full to limited to full access restores cached analysis without rescanning")
     func limitedAccessAnalysisCache() async throws {
         let service = CountingCachedAnalysis()
@@ -283,6 +306,27 @@ struct TypeGroupingTests {
         try await awaitAnalysis(harness.model)
         #expect(harness.model.typeAnalysisCompleted == 2)
         #expect(harness.model.typeAnalysisUnavailableCount == 2)
+    }
+
+    @Test("already attempted media in current session avoids duplicate scan on tab switch")
+    func noDuplicateScanOnTabSwitch() async throws {
+        let service = TypeFixtureAnalysis(unavailable: true)
+        let harness = try makeHarness(analysis: service)
+        await harness.model.start()
+        harness.model.grouping = .type
+        try await awaitAnalysis(harness.model)
+        #expect(!harness.model.isAnalyzingTypes)
+        #expect(harness.model.typeAnalysisUnavailableCount == 2)
+
+        // Switching away and returning does NOT restart heavy scan on already evaluated media
+        harness.model.grouping = .month
+        harness.model.grouping = .type
+        #expect(!harness.model.isAnalyzingTypes)
+
+        // Background and foreground does NOT restart heavy scan
+        harness.model.setForeground(false)
+        harness.model.setForeground(true)
+        #expect(!harness.model.isAnalyzingTypes)
     }
 
     @Test("Type scroll anchors are independent and recover from hidden groups")
@@ -498,6 +542,45 @@ struct TypeGroupingTests {
         #expect(harness.model.typeGroups.map(\.key.value) == ["videos"])
         await service.finish(at: 0)
         await reload.value
+    }
+
+    @Test("a history reset overlapping matching preserves the latest groups")
+    func historyResetOverlappingMatchingKeepsLatestGroups() async throws {
+        let service = SuspendedClusterAnalysis()
+        let harness = try makeHarness(analysis: service)
+        harness.library.assets += (0..<50_000).map { index in
+            PhotoAssetDescriptor(id: "metadata-\(index)",
+                creationDate: Date(timeIntervalSince1970: Double(index) * 86_400),
+                coordinate: nil, mediaKind: .video, duration: 1, pixelWidth: 100, pixelHeight: 100)
+        }
+        let repository = SwiftDataCleanupRepository(container: harness.container)
+        for asset in harness.library.assets where asset.mediaKind != .video {
+            try repository.cacheAnalysis(TypeFixtureAnalysis.result, for: asset)
+        }
+        try repository.markCompleted(groupKey: "month:1900-01", label: "January 1900")
+        try repository.markCompleted(groupKey: "location:resolved:ghost", label: "Old place")
+        await harness.model.start()
+        #expect(harness.model.monthGroups.contains { $0.id == "month:1900-01" })
+        #expect(harness.model.locationGroups.contains { $0.id == "location:resolved:ghost" })
+
+        await service.suspend()
+        let reload = Task { await harness.model.reloadLibrary() }
+        await service.waitForPending(1)
+        harness.model.selectedGroupIDs = ["month:1900-01"]
+        let reset = Task { await harness.model.resetHistory() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !harness.model.selectedGroupIDs.isEmpty && ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+        #expect(harness.model.selectedGroupIDs.isEmpty)
+        await service.finish(at: 0)
+        await reload.value
+        #expect(await reset.value)
+
+        #expect(harness.model.similarClusters.first?.assetIDs == ["a", "b"])
+        #expect(harness.model.typeGroups.first { $0.key.value == "similarPhotos" }?.assetIDs == ["a", "b"])
+        #expect(!harness.model.monthGroups.contains { $0.id == "month:1900-01" })
+        #expect(!harness.model.locationGroups.contains { $0.id == "location:resolved:ghost" })
     }
 
     @Test("unchanged Similar Photos stays visible during a refresh instead of moving its scroll anchor")

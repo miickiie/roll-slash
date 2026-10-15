@@ -164,10 +164,12 @@ protocol MediaPreviewProvider: AnyObject {
     func startCaching(identifiers: [String], targetSize: CGSize, kind: PreviewRequestKind)
     func stopCachingAll()
     func invalidateCachedImages()
+    func invalidateCachedImages(for identifiers: Set<String>)
 }
 
 extension MediaPreviewProvider {
     func invalidateCachedImages() {}
+    func invalidateCachedImages(for identifiers: Set<String>) {}
 }
 
 @MainActor
@@ -237,6 +239,18 @@ final class PreviewImageCache {
         entries.removeAll()
         order.removeAll()
         byteCount = 0
+    }
+
+    func remove(for identifiers: Set<String>) {
+        guard !identifiers.isEmpty else { return }
+        generation += 1
+        let toRemove = entries.keys.filter { identifiers.contains($0.identifier) }
+        for key in toRemove {
+            if let entry = entries.removeValue(forKey: key) {
+                byteCount -= entry.cost
+            }
+        }
+        order.removeAll { identifiers.contains($0.identifier) }
     }
 
     private func touch(_ key: Key) {
@@ -390,6 +404,18 @@ final class PhotoKitMediaPreviewProvider: MediaPreviewProvider {
         stopCachingAll()
         renderedImages.removeAll()
         resolvedAssets.removeAll()
+    }
+
+    func invalidateCachedImages(for identifiers: Set<String>) {
+        guard !identifiers.isEmpty else { return }
+        for id in identifiers {
+            if let asset = cachedAssets.removeValue(forKey: id), let config = cachedConfiguration {
+                manager.stopCachingImages(for: [asset], targetSize: config.targetSize,
+                                          contentMode: config.contentMode, options: config.options)
+            }
+            resolvedAssets.removeValue(forKey: id)
+        }
+        renderedImages.remove(for: identifiers)
     }
 
     private func asset(for identifier: String) -> PHAsset? {

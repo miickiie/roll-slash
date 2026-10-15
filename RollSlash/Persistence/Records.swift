@@ -263,5 +263,13 @@ final class MediaAnalysisCacheRecord {
         self.resultData = try JSONEncoder().encode(result)
     }
 
-    var result: MediaAnalysisResult? { try? JSONDecoder().decode(MediaAnalysisResult.self, from: resultData) }
+    func decodedResult(using decoder: JSONDecoder) -> MediaAnalysisResult? {
+        try? decoder.decode(MediaAnalysisResult.self, from: resultData)
+    }
+
+    var result: MediaAnalysisResult? {
+        decodedResult(using: Self.sharedDecoder)
+    }
+
+    private static let sharedDecoder = JSONDecoder()
 }

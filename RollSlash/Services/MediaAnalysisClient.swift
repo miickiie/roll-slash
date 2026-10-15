@@ -100,9 +100,13 @@ private actor PhotoKitAnalysisWorker {
     func analyze(_ descriptor: PhotoAssetDescriptor, cachedResult: MediaAnalysisResult?,
                  similarityAvailable: Bool) async -> MediaAnalysisResult {
         var result = cachedResult ?? MediaAnalysisResult()
-        guard !Task.isCancelled, descriptor.mediaKind != .video,
-              let asset = PHAsset.fetchAssets(withLocalIdentifiers: [descriptor.id], options: nil).firstObject else { return result }
+        guard !Task.isCancelled, descriptor.mediaKind != .video else { return result }
         let plan = AnalysisPhasePlan(cached: result, similarityAvailable: similarityAvailable)
+        guard plan.sizing || plan.image else {
+            result.similarityUnavailable = (result.featurePrint == nil || result.perceptualHash == nil) && !similarityAvailable
+            return result
+        }
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [descriptor.id], options: nil).firstObject else { return result }
         if plan.sizing {
             let interval = AnalysisPerformance.begin(.sizing)
             result.isLarge = await isLarge(asset)
@@ -125,7 +129,13 @@ private actor PhotoKitAnalysisWorker {
         let (stream, continuation) = AsyncStream<UIImage?>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let requestID = manager.requestImage(for: asset, targetSize: CGSize(width: 1600, height: 1600),
                                              contentMode: .aspectFit, options: options) { image, info in
-            guard (info?[PHImageResultIsDegradedKey] as? Bool) != true else { return }
+            if (info?[PHImageResultIsDegradedKey] as? Bool) == true {
+                if info?[PHImageErrorKey] != nil || (info?[PHImageResultIsInCloudKey] as? Bool) == true {
+                    continuation.yield(nil)
+                    continuation.finish()
+                }
+                return
+            }
             continuation.yield(image)
             continuation.finish()
         }

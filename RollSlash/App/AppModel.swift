@@ -221,6 +221,7 @@ final class AppModel {
         }
     }
     var monthGroups: [MediaGroup] = []
+    private(set) var monthSections: [(String, [MediaGroup])] = []
     var locationGroups: [MediaGroup] = []
     var typeGroups: [MediaGroup] = []
     @ObservationIgnored private(set) var analysisResults: [String: MediaAnalysisResult] = [:]
@@ -261,6 +262,7 @@ final class AppModel {
     @ObservationIgnored private var analysisCacheBuffer: [String: MediaAnalysisCacheEntry] = [:]
     @ObservationIgnored private var analysisCacheFlushTask: Task<Void, Never>?
     @ObservationIgnored private var unavailableSimilarityCount = 0
+    @ObservationIgnored private var attemptedAnalysisIDs: Set<String> = []
     @ObservationIgnored private var isForeground = true
     @ObservationIgnored private let cleanupMetricsStore: CleanupMetricsStore
     @ObservationIgnored private var hasStarted = false
@@ -566,9 +568,21 @@ final class AppModel {
         do {
             let fetchedAssets = try await photoLibrary.fetchAssets()
             guard generation == libraryReloadGeneration, permission.canRead else { return }
+            let previousAssets = assetIndex
             assets = fetchedAssets
             assetIndex = Dictionary(uniqueKeysWithValues: fetchedAssets.map { ($0.id, $0) })
-            previewProvider.invalidateCachedImages()
+            if !previousAssets.isEmpty {
+                let changedOrRemoved = Set(previousAssets.compactMap { id, prev -> String? in
+                    guard let current = assetIndex[id] else { return id }
+                    return current.modificationDate != prev.modificationDate ? id : nil
+                })
+                if !changedOrRemoved.isEmpty {
+                    previewProvider.invalidateCachedImages(for: changedOrRemoved)
+                }
+            } else {
+                previewProvider.invalidateCachedImages()
+            }
+            attemptedAnalysisIDs.removeAll()
             try refreshDecisionCache()
             try await recoverDeletingSessionIfPossible(expectedReloadGeneration: generation)
             guard generation == libraryReloadGeneration, permission.canRead else { return }
@@ -596,6 +610,7 @@ final class AppModel {
             guard generation == libraryReloadGeneration, permission.canRead else { return }
             if clusters != similarClusters {
                 similarClusters = clusters
+                // Include concurrent history or metadata updates and supersede older group builds.
                 try await rebuildGroupsOffMain(expectedReloadGeneration: generation)
                 guard generation == libraryReloadGeneration, permission.canRead else { return }
             }
@@ -999,9 +1014,19 @@ final class AppModel {
               expectedReloadGeneration == nil || expectedReloadGeneration == libraryReloadGeneration,
               permission.canRead else { return }
         monthGroups = result.month
+        monthSections = Self.buildMonthSections(result.month)
         locationGroups = result.location
         typeGroups = result.type
         reconcileSelectedGroups()
+    }
+
+    nonisolated static func buildMonthSections(_ groups: [MediaGroup]) -> [(String, [MediaGroup])] {
+        let grouped = Dictionary(grouping: groups) { MonthGrouping.year(for: $0.key.value) ?? String(localized: "Other") }
+        return grouped.map { ($0.key, $0.value) }.sorted {
+            if $0.0 == String(localized: "Other") { return false }
+            if $1.0 == String(localized: "Other") { return true }
+            return $0.0 > $1.0
+        }
     }
 
     private func reconcileSelectedGroups() {
@@ -1149,9 +1174,10 @@ final class AppModel {
         let generation = typeAnalysisGeneration
         let snapshot = assets
         let photos = snapshot.filter { $0.mediaKind != .video }
-        let pending = photos.filter { analysisResults[$0.id]?.isComplete != true }
+        let totalUnavailable = photos.filter { analysisResults[$0.id]?.isComplete != true }.count
+        let pending = photos.filter { analysisResults[$0.id]?.isComplete != true && !attemptedAnalysisIDs.contains($0.id) }
         typeAnalysisTotal = photos.count
-        typeAnalysisCompleted = photos.count - pending.count
+        typeAnalysisCompleted = photos.count - totalUnavailable
         isAnalyzingTypes = !pending.isEmpty
         typeAnalysisTask = Task { [weak self] in
             guard let self else { return }
@@ -1167,8 +1193,8 @@ final class AppModel {
             await analysisClient.prepare()
             guard !Task.isCancelled, generation == typeAnalysisGeneration else { return }
             let client = analysisClient
-            let previouslyCompleted = photos.count - pending.count
-            var unavailable = pending.count
+            let previouslyCompleted = photos.count - totalUnavailable
+            var unavailable = totalUnavailable
             var processed = 0
             var fingerprintsChanged = false
             let clock = ContinuousClock()
@@ -1192,6 +1218,7 @@ final class AppModel {
                           assetIndex[asset.id].map({ MediaAnalysisResult.signature(for: $0) }) == MediaAnalysisResult.signature(for: asset) else {
                         group.cancelAll(); return
                     }
+                    attemptedAnalysisIDs.insert(asset.id)
                     var result = analyzed
                     let previous = analysisResults[asset.id]
                     if let previous {

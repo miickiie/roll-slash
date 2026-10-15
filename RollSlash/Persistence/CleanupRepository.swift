@@ -45,6 +45,7 @@ final class SwiftDataCleanupRepository: CleanupRepository {
     private let analysisContext: ModelContext
     private var analysisIndex: [String: MediaAnalysisCacheRecord]?
     private let analysisEncoder = JSONEncoder()
+    private let analysisDecoder = JSONDecoder()
     private let saveChanges: (ModelContext) throws -> Void
 
     init(container: ModelContainer, saveChanges: @escaping (ModelContext) throws -> Void = { try $0.save() }) {
@@ -230,7 +231,7 @@ final class SwiftDataCleanupRepository: CleanupRepository {
                 analysisContext.delete(record)
                 continue
             }
-            results[record.assetIdentifier] = record.result
+            results[record.assetIdentifier] = record.decodedResult(using: analysisDecoder)
             index[record.assetIdentifier] = record
         }
         do { try analysisContext.save(); analysisIndex = index }

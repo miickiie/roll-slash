@@ -328,6 +328,24 @@ struct PreviewImageCacheTests {
         #expect(cache.byteCount == 0)
     }
 
+    @Test("selective invalidation removes only targeted identifiers and keeps unaffected images")
+    func selectiveInvalidation() async {
+        let cache = PreviewImageCache()
+        let imageA = makeImage(size: 10)
+        let imageB = makeImage(size: 10)
+        let size = CGSize(width: 100, height: 100)
+        let keyA = PreviewImageCache.Key(identifier: "a", kind: .active, targetSize: size)
+        let keyB = PreviewImageCache.Key(identifier: "b", kind: .active, targetSize: size)
+        cache.store(imageA, for: keyA, generation: cache.generation)
+        cache.store(imageB, for: keyB, generation: cache.generation)
+
+        let provider = PhotoKitMediaPreviewProvider(imageCache: cache)
+        provider.invalidateCachedImages(for: ["a"])
+
+        #expect(cache.image(for: keyA) == nil)
+        #expect(cache.image(for: keyB) === imageB)
+    }
+
     private func key(_ id: String) -> PreviewImageCache.Key {
         PreviewImageCache.Key(identifier: id, kind: .active, targetSize: CGSize(width: 10, height: 10))
     }

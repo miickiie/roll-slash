@@ -872,12 +872,7 @@ private struct MonthGroupList: View {
     private let singleColumn = [GridItem(.flexible(minimum: 0), alignment: .top)]
 
     private var sections: [(String, [MediaGroup])] {
-        let grouped = Dictionary(grouping: appModel.monthGroups) { MonthGrouping.year(for: $0.key.value) ?? String(localized: "Other") }
-        return grouped.map { ($0.key, $0.value) }.sorted {
-            if $0.0 == String(localized: "Other") { return false }
-            if $1.0 == String(localized: "Other") { return true }
-            return $0.0 > $1.0
-        }
+        appModel.monthSections
     }
 
     private var orderedGroupIDs: [String] {
